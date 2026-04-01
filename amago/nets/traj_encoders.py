@@ -376,7 +376,7 @@ class TformerTrajEncoder(TrajEncoder):
         sigma_reparam: bool = True,
         normformer_norms: bool = True,
         head_scaling: bool = True,
-        attention_type: type[transformer.SelfAttention] = transformer.FlashAttention,
+        attention_type: type[transformer.SelfAttention] = transformer.FlashAttention,#TODO rollback to FlashAttention after debugging
     ):
         super().__init__(tstep_dim, max_seq_len)
         self.head_dim = d_model // n_heads
@@ -510,6 +510,134 @@ class _MambaHiddenState:
         conv, ssm = conv_ssm
         self.conv_states[layer_idx] = conv
         self.ssm_states[layer_idx] = ssm
+
+
+@gin.configurable
+@register_traj_encoder("mate")
+class MateTrajEncoder(TrajEncoder):
+    """MATE (Memory via Additive TransiTion Embeddings) Trajectory Encoder.
+
+    A lightweight recurrent encoder that accumulates per-timestep MLP embeddings
+    via a running cumulative sum instead of a gated RNN or attention.
+
+    At each step the model computes a "delta" :math:`z_t = \\text{MLP}(s_t)` and
+    the hidden state evolves as :math:`h_t = h_{t-1} + z_t`.  The output at each
+    position is :math:`h_t`, making the forward pass a simple prefix-sum after the
+    MLP blocks.
+
+    Args:
+        tstep_dim: Dimension of the input timestep representation.
+        max_seq_len: Maximum sequence length.
+
+    Keyword Args:
+        d_model: Hidden/output dimension. Defaults to 256.
+        n_layers: Number of residual FFBlocks used as the per-step embedder.
+            Defaults to 2.
+        d_ff: Inner dimension of each FFBlock. Defaults to ``4 * d_model``.
+        dropout: Dropout rate applied inside FFBlocks. Defaults to 0.0.
+        activation: Activation function. Defaults to ``"leaky_relu"``.
+        norm: Normalization inside FFBlocks. Defaults to ``None``.
+        out_norm: Normalization applied to the output sequence. Defaults to
+            ``"layer"``.
+        project_output: If ``True``, applies a learnable sphere projection to
+            the output after ``out_norm``.
+            Specifically: ``output = (output + init_emb) / ||output + init_emb|| * sqrt(d_model)``.
+            Because cumsum accumulates unboundedly, this keeps output magnitudes
+            stable while preserving directional information. A learnable
+            ``init_emb`` vector is added before normalisation so that the
+            projection is well-defined even when the cumsum is near zero.
+            Defaults to ``False``.
+    """
+
+    def __init__(
+        self,
+        tstep_dim: int,
+        max_seq_len: int,
+        d_model: int = 256,
+        n_layers: int = 2,
+        d_ff: Optional[int] = None,
+        dropout: float = 0.0,
+        activation: str = "leaky_relu",
+        norm: Optional[str] = None,
+        out_norm: str = "layer",
+        project_output: bool = False,
+    ):
+        super().__init__(tstep_dim, max_seq_len)
+        d_ff = d_ff or d_model * 4
+        self.d_model = d_model
+        self.inp = nn.Linear(tstep_dim, d_model)
+        self.blocks = nn.ModuleList(
+            [
+                ff.FFBlock(
+                    d_model,
+                    d_ff,
+                    dropout=dropout,
+                    activation=activation,
+                    norm=norm,
+                )
+                for _ in range(n_layers)
+            ]
+        )
+        self.out_norm = ff.Normalization(out_norm, d_model)
+        self.project_output = project_output
+        if project_output:
+            self.init_emb = nn.Parameter(torch.randn(d_model))
+        self._emb_dim = d_model
+
+    @property
+    def emb_dim(self) -> int:
+        return self._emb_dim
+
+    def _embed(self, seq: torch.Tensor) -> torch.Tensor:
+        """Project input and apply residual FFBlocks -> per-step delta z."""
+        x = self.inp(seq)
+        for block in self.blocks:
+            x = block(x)
+        return x  # (B, T, d_model)
+
+    def init_hidden_state(
+        self, batch_size: int, device: torch.device
+    ) -> torch.Tensor:
+        # Hidden state = accumulated sum h_t; starts at zero.
+        return torch.zeros(
+            (batch_size, 1, self.d_model), dtype=torch.float32, device=device
+        )
+
+    def reset_hidden_state(
+        self, hidden_state: Optional[torch.Tensor], dones: np.ndarray
+    ) -> Optional[torch.Tensor]:
+        if hidden_state is None:
+            return None
+        hidden_state[dones] = 0.0
+        return hidden_state
+
+    def forward(
+        self,
+        seq: torch.Tensor,
+        time_idxs: Optional[torch.Tensor] = None,
+        hidden_state: Optional[torch.Tensor] = None,
+        log_dict: Optional[dict] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        # seq: (B, T, tstep_dim)
+        z = self._embed(seq)  # (B, T, d_model)
+
+        if hidden_state is None:
+            # Training: cumsum from zero over the full sequence.
+            cumsum = z.cumsum(dim=1)  # (B, T, d_model)
+            new_hidden_state = None
+        else:
+            # Inference: continue the running sum from the stored h_{t-1}.
+            # hidden_state: (B, 1, d_model)
+            cumsum = hidden_state + z.cumsum(dim=1)  # (B, T, d_model)
+            new_hidden_state = cumsum[:, -1:, :]  # (B, 1, d_model)
+            # NOTE: new_hidden_state stores the raw cumsum so that the next
+            # call can continue accumulating correctly.
+
+        output = self.out_norm(cumsum)
+        if self.project_output:
+            output = output + self.init_emb
+            output = output / output.norm(dim=-1, keepdim=True).clamp(min=1e-6) * np.sqrt(self.d_model)
+        return output, new_hidden_state
 
 
 @gin.configurable

@@ -44,19 +44,26 @@ if __name__ == "__main__":
     }
 
     # Use MateTrajEncoder directly and bind d_model / n_layers correctly.
+    #
     # --- Parameter count reference (d_model=320, d_ff=1280) ---
-    #   Transformer n_layers=3 : ~3.79 M params  (attention + FFN per layer)
-    #   MATE        n_layers=3 : ~2.55 M params  (FFN only per layer, 1.49x fewer)
-    #   MATE        n_layers=4 : ~3.37 M params  (closest under)
-    #   MATE        n_layers=5 : ~4.19 M params  (closest over)
-    # => For a fair param-matched comparison use --memory_layers 4 (or 5).
-    #    Using --memory_layers 3 compares same depth but fewer parameters.
+    # MATE now uses the same FFN sub-layer as Transformer (SigmaReparam + NormFormer
+    # norms), so parameter counts per block match between the two architectures.
+    # The only difference is that MATE has *no* attention sub-layer per depth.
+    #
+    #   Transformer n_layers=3 : ~3.80 M  (attention ~412K + FFN ~827K per layer)
+    #   MATE        n_layers=3 : ~2.57 M  (FFN ~827K per layer, no attention)
+    #   MATE        n_layers=4 : ~3.39 M  (closest param match, slightly under)
+    #   MATE        n_layers=5 : ~4.22 M  (slightly over)
+    #
+    # => For a fair param-matched comparison use --memory_layers 4.
+    #    Using --memory_layers 3 isolates the effect of attention vs. cumsum
+    #    at the same depth, but with ~33% fewer parameters.
     mate_config_prefix = (
         f"{MateTrajEncoder.__module__}.{MateTrajEncoder.__name__}"
     )
     config[f"{mate_config_prefix}.d_model"] = args.memory_size
     config[f"{mate_config_prefix}.n_layers"] = args.memory_layers
-    config[f"{mate_config_prefix}.project_output"] = True
+    config[f"{mate_config_prefix}.proj"] = "hyper"
 
     traj_encoder_type = MateTrajEncoder
 

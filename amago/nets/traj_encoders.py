@@ -512,18 +512,85 @@ class _MambaHiddenState:
         self.ssm_states[layer_idx] = ssm
 
 
+class _MATEFFNBlock(nn.Module):
+    """FFN sub-layer of a Transformer block, without self-attention.
+
+    Mirrors the FFN part of :class:`~amago.nets.transformer.TransformerLayer`
+    exactly: pre-norm → activation → optional NormFormer norm → dropout →
+    residual.  Used by :class:`MateTrajEncoder` so that the per-step processing
+    matches a Transformer up to (but not including) the attention sub-layer.
+
+    Args:
+        d_model: Residual stream dimension.
+        d_ff: Inner (expanded) dimension.
+
+    Keyword Args:
+        dropout_ff: Dropout applied after the second linear layer. Defaults to
+            0.05.
+        activation: Activation function name. Defaults to ``"leaky_relu"``.
+        norm: Normalization method for pre-norm and NormFormer norm. Defaults
+            to ``"layer"``.
+        sigma_reparam: Use SigmaReparam linear layers (same as Transformer).
+            Defaults to ``True``.
+        normformer_norms: Add extra NormFormer norm after the first activation
+            (same as Transformer). Defaults to ``True``.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        d_ff: int,
+        dropout_ff: float = 0.05,
+        activation: str = "leaky_relu",
+        norm: str = "layer",
+        sigma_reparam: bool = True,
+        normformer_norms: bool = True,
+    ):
+        super().__init__()
+        FF = transformer.SigmaReparam if sigma_reparam else nn.Linear
+        self.ff1 = FF(d_model, d_ff)
+        self.ff2 = FF(d_ff, d_model)
+        self.norm1 = ff.Normalization(norm, d_model)   # pre-norm  (= norm3 in TransformerLayer)
+        self.norm2 = (
+            ff.Normalization(norm, d_ff) if normformer_norms else nn.Identity()
+        )  # NormFormer extra norm  (= norm4 in TransformerLayer)
+        self.dropout_ff = nn.Dropout(dropout_ff)
+        self.activation = utils.activation_switch(activation)
+        self.d_model = d_model
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        q = self.norm1(x)
+        q = self.norm2(self.activation(self.ff1(q)))
+        q = self.dropout_ff(self.ff2(q))
+        return x + q
+
+
 @gin.configurable
 @register_traj_encoder("mate")
 class MateTrajEncoder(TrajEncoder):
-    """MATE (Memory via Additive TransiTion Embeddings) Trajectory Encoder.
+    r"""MATE (Memory via Additive TransiTion Embeddings) Trajectory Encoder.
 
-    A lightweight recurrent encoder that accumulates per-timestep MLP embeddings
-    via a running cumulative sum instead of a gated RNN or attention.
+    Shares the same preprocessing and per-step FFN structure as
+    :class:`TformerTrajEncoder`, but **replaces self-attention** with a causal
+    cumulative sum as the cross-timestep memory mechanism, followed by an output
+    projection.
 
-    At each step the model computes a "delta" :math:`z_t = \\text{MLP}(s_t)` and
-    the hidden state evolves as :math:`h_t = h_{t-1} + z_t`.  The output at each
-    position is :math:`h_t`, making the forward pass a simple prefix-sum after the
-    MLP blocks.
+    **Structure compared to Transformer:**
+
+    - *Shared* (attention 전까지 동일):
+        - ``tstep_dim → d_model`` linear projection.
+        - Positional embedding (fixed sinusoidal or learnable).
+        - Input dropout.
+        - N × :class:`_MATEFFNBlock` — the FFN sub-layer of a
+          :class:`~amago.nets.transformer.TransformerLayer` (pre-norm,
+          SigmaReparam, NormFormer norm, residual) without self-attention.
+    - *Replaced* (attention layer → MATE memory):
+        - Causal cumulative sum :math:`h_t = \sum_{i=1}^{t} z_i` over the
+          per-step FFN outputs.
+    - *Added* (output projection):
+        - ``"hyper"`` (default) — projects onto a learnable hypersphere:
+          :math:`(h_t + e) / \|h_t + e\| \cdot \sqrt{d}`.
+        - ``"mean"`` — running mean: :math:`h_t / t`.
 
     Args:
         tstep_dim: Dimension of the input timestep representation.
@@ -531,22 +598,33 @@ class MateTrajEncoder(TrajEncoder):
 
     Keyword Args:
         d_model: Hidden/output dimension. Defaults to 256.
-        n_layers: Number of residual FFBlocks used as the per-step embedder.
-            Defaults to 2.
-        d_ff: Inner dimension of each FFBlock. Defaults to ``4 * d_model``.
-        dropout: Dropout rate applied inside FFBlocks. Defaults to 0.0.
+        n_layers: Number of :class:`_MATEFFNBlock` blocks (= Transformer depth
+            without attention). Defaults to 2.
+        d_ff: Inner dimension of each FFN block. Defaults to ``4 * d_model``.
+        dropout_ff: Dropout inside FFN blocks. Defaults to 0.05.
+        dropout_emb: Dropout on the input embedding
+            (projection + positional embedding). Defaults to 0.05.
         activation: Activation function. Defaults to ``"leaky_relu"``.
-        norm: Normalization inside FFBlocks. Defaults to ``None``.
-        out_norm: Normalization applied to the output sequence. Defaults to
+        norm: Normalization for per-block norms and final norm. Defaults to
             ``"layer"``.
-        project_output: If ``True``, applies a learnable sphere projection to
-            the output after ``out_norm``.
-            Specifically: ``output = (output + init_emb) / ||output + init_emb|| * sqrt(d_model)``.
-            Because cumsum accumulates unboundedly, this keeps output magnitudes
-            stable while preserving directional information. A learnable
-            ``init_emb`` vector is added before normalisation so that the
-            projection is well-defined even when the cumsum is near zero.
-            Defaults to ``False``.
+        pos_emb: Positional embedding type — ``"fixed"`` (sinusoidal, default)
+            or ``"learnable"``.
+        sigma_reparam: Use SigmaReparam linear layers, same as
+            :class:`TformerTrajEncoder`. Defaults to ``True``.
+        normformer_norms: Add NormFormer extra norms inside FFN blocks, same as
+            :class:`TformerTrajEncoder`. Defaults to ``True``.
+        proj: Output projection applied to the cumulative-sum output.
+            ``"hyper"`` (default) applies hypersphere projection with a
+            learnable offset ``init_emb``.  ``"mean"`` divides by the
+            cumulative step count :math:`t` to yield a running mean.
+        pos_emb: Positional embedding type to inject before the FFN blocks.
+            ``"none"`` (default) disables positional embedding entirely — this
+            matches the original MATE design, because the causal cumulative sum
+            already encodes order implicitly (h_t = z_1 + ... + z_t, so earlier
+            tokens contribute more to later states).  ``"fixed"`` (sinusoidal)
+            or ``"learnable"`` can be enabled for experimental comparison with
+            the Transformer, where pos_emb is required to make attention
+            position-aware.
     """
 
     def __init__(
@@ -556,87 +634,144 @@ class MateTrajEncoder(TrajEncoder):
         d_model: int = 256,
         n_layers: int = 2,
         d_ff: Optional[int] = None,
-        dropout: float = 0.0,
+        dropout_ff: float = 0.05,
+        dropout_emb: float = 0.05,
         activation: str = "leaky_relu",
-        norm: Optional[str] = None,
-        out_norm: str = "layer",
-        project_output: bool = False,
+        norm: str = "layer",
+        pos_emb: str = "none",
+        sigma_reparam: bool = True,
+        normformer_norms: bool = True,
+        proj: str = "hyper",
     ):
         super().__init__(tstep_dim, max_seq_len)
+        assert proj in ("hyper", "mean"), (
+            f"proj must be 'hyper' or 'mean', got '{proj}'"
+        )
+        assert pos_emb in ("none", "fixed", "learnable"), (
+            f"pos_emb must be 'none', 'fixed', or 'learnable', got '{pos_emb}'"
+        )
         d_ff = d_ff or d_model * 4
         self.d_model = d_model
+        self.proj = proj
+
+        # --- Preprocessing: same as Transformer (pos_emb optional) ---
         self.inp = nn.Linear(tstep_dim, d_model)
+        if pos_emb == "none":
+            self.position_embedding = None
+        elif pos_emb == "fixed":
+            self.position_embedding = transformer.FixedPosEmb(d_model)
+        elif pos_emb == "learnable":
+            self.position_embedding = transformer.LearnablePosEmb(d_model)
+        self.dropout_emb = nn.Dropout(dropout_emb)
+
+        # --- Per-step FFN blocks (TransformerLayer FFN sub-layer, no attention) ---
         self.blocks = nn.ModuleList(
             [
-                ff.FFBlock(
-                    d_model,
-                    d_ff,
-                    dropout=dropout,
+                _MATEFFNBlock(
+                    d_model=d_model,
+                    d_ff=d_ff,
+                    dropout_ff=dropout_ff,
                     activation=activation,
                     norm=norm,
+                    sigma_reparam=sigma_reparam,
+                    normformer_norms=normformer_norms,
                 )
                 for _ in range(n_layers)
             ]
         )
-        self.out_norm = ff.Normalization(out_norm, d_model)
-        self.project_output = project_output
-        if project_output:
+
+        # --- Final norm: same as Transformer's output norm ---
+        self.out_norm = ff.Normalization(norm, d_model)
+
+        # --- Projection ---
+        if proj == "hyper":
             self.init_emb = nn.Parameter(torch.randn(d_model))
+
         self._emb_dim = d_model
 
     @property
     def emb_dim(self) -> int:
         return self._emb_dim
 
-    def _embed(self, seq: torch.Tensor) -> torch.Tensor:
-        """Project input and apply residual FFBlocks -> per-step delta z."""
+    def _preprocess(self, seq: torch.Tensor, time_idxs: Optional[torch.Tensor]) -> torch.Tensor:
+        """Input projection + optional positional embedding + dropout."""
         x = self.inp(seq)
+        if self.position_embedding is not None:
+            x = x + self.position_embedding(time_idxs.squeeze(-1))
+        return self.dropout_emb(x)
+
+    def _ffn_blocks(self, x: torch.Tensor) -> torch.Tensor:
+        """Per-step FFN blocks — Transformer FFN sub-layer without attention."""
         for block in self.blocks:
             x = block(x)
-        return x  # (B, T, d_model)
+        return x
 
     def init_hidden_state(
         self, batch_size: int, device: torch.device
-    ) -> torch.Tensor:
-        # Hidden state = accumulated sum h_t; starts at zero.
-        return torch.zeros(
-            (batch_size, 1, self.d_model), dtype=torch.float32, device=device
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # (cumulative sum h_t, step count t); both start at zero.
+        return (
+            torch.zeros((batch_size, 1, self.d_model), dtype=torch.float32, device=device),
+            torch.zeros((batch_size, 1, 1), dtype=torch.float32, device=device),
         )
 
     def reset_hidden_state(
-        self, hidden_state: Optional[torch.Tensor], dones: np.ndarray
-    ) -> Optional[torch.Tensor]:
+        self,
+        hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        dones: np.ndarray,
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
         if hidden_state is None:
             return None
-        hidden_state[dones] = 0.0
-        return hidden_state
+        cumsum, count = hidden_state
+        cumsum[dones] = 0.0
+        count[dones] = 0.0
+        return (cumsum, count)
 
     def forward(
         self,
         seq: torch.Tensor,
         time_idxs: Optional[torch.Tensor] = None,
-        hidden_state: Optional[torch.Tensor] = None,
+        hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         log_dict: Optional[dict] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # seq: (B, T, tstep_dim)
-        z = self._embed(seq)  # (B, T, d_model)
+        assert self.position_embedding is None or time_idxs is not None, (
+            "time_idxs is required when pos_emb != 'none'."
+        )
+
+        # Preprocessing: inp projection + optional pos emb + dropout
+        x = self._preprocess(seq, time_idxs)         # (B, T, d_model)
+
+        # Per-step FFN blocks  (Transformer FFN sub-layer, no attention)
+        z = self._ffn_blocks(x)                       # (B, T, d_model)
+
+        # Cumulative sum: causal prefix-sum replaces attention as memory mechanism
+        T = seq.shape[1]
+        local_counts = torch.arange(1, T + 1, device=seq.device, dtype=z.dtype).view(1, T, 1)
 
         if hidden_state is None:
-            # Training: cumsum from zero over the full sequence.
-            cumsum = z.cumsum(dim=1)  # (B, T, d_model)
+            # Training: cumsum from zero over the full window.
+            cumsum = z.cumsum(dim=1)       # (B, T, d_model)
+            counts = local_counts          # (1, T, 1)
             new_hidden_state = None
         else:
-            # Inference: continue the running sum from the stored h_{t-1}.
-            # hidden_state: (B, 1, d_model)
-            cumsum = hidden_state + z.cumsum(dim=1)  # (B, T, d_model)
-            new_hidden_state = cumsum[:, -1:, :]  # (B, 1, d_model)
-            # NOTE: new_hidden_state stores the raw cumsum so that the next
-            # call can continue accumulating correctly.
+            # Inference: continue the running sum and count from stored state.
+            prev_cumsum, prev_count = hidden_state
+            cumsum = prev_cumsum + z.cumsum(dim=1)     # (B, T, d_model)
+            counts = prev_count + local_counts         # (B, T, 1)
+            new_hidden_state = (cumsum[:, -1:, :], counts[:, -1:, :])
 
         output = self.out_norm(cumsum)
-        if self.project_output:
+
+        if self.proj == "hyper":
+            # Hypersphere projection: stable magnitude, directional info preserved.
             output = output + self.init_emb
             output = output / output.norm(dim=-1, keepdim=True).clamp(min=1e-6) * np.sqrt(self.d_model)
+        elif self.proj == "mean":
+            # Running mean: divide cumsum by cumulative step count t.
+            output = output + self.init_emb
+            output = output / counts
+
         return output, new_hidden_state
 
 

@@ -177,6 +177,37 @@ Example `wandb` from a recent large-scale attempt with the Multi-Task agent: [Ac
 
 <br>
 
+### 7b. **Transformer vs. MATE: Meta-World**
+**[`07_metaworld_mate.py`](examples/07_metaworld_mate.py)**
+
+MATE (Memory via Additive TransiTion Embeddings) replaces Transformer self-attention with a causal cumulative sum (`h_t = z_1 + z_2 + ... + z_t`), while keeping the same input projection, positional embedding (optional), and per-layer FFN structure. Unlike the Transformer, cross-timestep interaction happens exactly once regardless of depth, making MATE significantly cheaper. The output is projected onto a hypersphere (`proj="hyper"`, default) or normalized as a running mean (`proj="mean"`) to prevent unbounded magnitude growth.
+
+**Transformer baseline (`n_layers=3`, ~3.80M params):**
+```bash
+python examples/07_metaworld.py --run_name metaworld_ml45 --benchmark ml45 \
+  --buffer_dir /data1/grigsby/metaworld_buffers --parallel_actors 40 \
+  --memory_size 320 --timesteps_per_epoch 1501 --agent_type multitask \
+  --max_seq_len 256 --memory_layers 3 --dset_max_size 25000 --epochs 5000 --val_interval 40
+```
+
+**MATE — same depth, attention effect isolated (`n_layers=3`, ~2.57M params):**
+```bash
+python examples/07_metaworld_mate.py --run_name metaworld_ml45_mate_d3 --benchmark ml45 \
+  --buffer_dir /data1/grigsby/metaworld_buffers --parallel_actors 40 \
+  --memory_size 320 --timesteps_per_epoch 1501 --agent_type multitask \
+  --max_seq_len 256 --memory_layers 3 --dset_max_size 25000 --epochs 5000 --val_interval 40
+```
+
+**MATE — parameter-matched (`n_layers=4`, ~3.39M params, recommended for fair comparison):**
+```bash
+python examples/07_metaworld_mate.py --run_name metaworld_ml45_mate_d4 --benchmark ml45 \
+  --buffer_dir /data1/grigsby/metaworld_buffers --parallel_actors 40 \
+  --memory_size 320 --timesteps_per_epoch 1501 --agent_type multitask \
+  --max_seq_len 256 --memory_layers 4 --dset_max_size 25000 --epochs 5000 --val_interval 40
+```
+
+<br>
+
 ### 8. **Multi-Task RL: Atari**
 **[`08_ale.py`](examples/08_ale.py)**
 
@@ -296,4 +327,16 @@ Check out our [project website](https://metamon.tech)!
   url={https://openreview.net/forum?id=OSHaRf4TVU}
 }
 ```
+## Code 실행
+python examples/07_metaworld_mate.py \
+  --run_name metaworld_ml45_mate_d3 --benchmark ml45 \
+  --buffer_dir /your/path/to/buffer \
+  --parallel_actors 40 --memory_size 320 \
+  --timesteps_per_epoch 1501 --agent_type multitask \
+  --max_seq_len 256 --memory_layers 3 \
+  --dset_max_size 25000 --epochs 5000 --val_interval 40
 
+
+
+#attention vs mate ablation만 하고 싶다면 위로, 만약 parm #을 비슷하게 공정하게 비교하고싶다면 
+memory_layers 4로 설정

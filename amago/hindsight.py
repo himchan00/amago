@@ -81,6 +81,10 @@ class Timestep:
         new.time_idx[reset_idxs] = 0
         new.terminal[reset_idxs] = False
         new.prev_action[reset_idxs] = 0
+        # zero out prev_obs for reset envs so new episode starts clean
+        for key in list(new.obs.keys()):
+            if key.startswith("_prev_"):
+                new.obs[key][reset_idxs] = 0
         return new
 
 

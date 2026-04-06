@@ -554,9 +554,11 @@ class DiskTrajDataset(RLDataset):
         dset_max_size: int,
         dset_min_size: int = 1,
         relabeler: Optional[Relabeler] = None,
+        full_transition: bool = False,
     ):
         super().__init__(dset_name=dset_name)
         self.relabeler = NoOpRelabeler() if relabeler is None else relabeler
+        self.full_transition = full_transition
         # create two directories for the FIFO and protected buffers
         self.fifo_path = get_path_to_trajs(dset_root, dset_name, fifo=True)
         self.protected_path = get_path_to_trajs(dset_root, dset_name, fifo=False)
@@ -694,6 +696,17 @@ class DiskTrajDataset(RLDataset):
             traj = traj.freeze()
         assert isinstance(traj, FrozenTraj)
         obs = {k: torch.from_numpy(v) for k, v in traj.obs.items()}
+        if self.full_transition:
+            # Add prev_obs keys (_prev_<key>) if not already stored (e.g. old .npz files).
+            # prev_obs[t] = obs[t-1], with zeros at t=0. This gives the full transition
+            # (o_{t-1}, a_{t-1}, r_{t-1}, o_t) = (s_t, a_t, r_t, s_{t+1}) as MATE input.
+            base_keys = [k for k in obs if not k.startswith("_prev_")]
+            for k in base_keys:
+                prev_key = f"_prev_{k}"
+                if prev_key not in obs:
+                    v = obs[k]  # (T, ...)
+                    zeros = torch.zeros_like(v[:1])
+                    obs[prev_key] = torch.cat([zeros, v[:-1]], dim=0)
         rl2s = torch.from_numpy(traj.rl2s).float()
         time_idxs = torch.from_numpy(traj.time_idxs).long()
         rews = torch.from_numpy(traj.rews).float()

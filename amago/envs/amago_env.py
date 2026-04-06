@@ -213,6 +213,7 @@ class SequenceWrapper(gym.Wrapper):
         save_trajs_to: Optional[str],
         save_every: Optional[tuple[int, int]] = None,
         save_trajs_as: str = "npz",
+        full_transition: bool = False,
     ):
         super().__init__(env)
 
@@ -223,6 +224,7 @@ class SequenceWrapper(gym.Wrapper):
             os.makedirs(self.dset_write_dir, exist_ok=True)
         self.save_every = save_every
         self.save_trajs_as = save_trajs_as
+        self.full_transition = full_transition
         self._total_frames = 0
         self._total_frames_by_env_name = defaultdict(int)
         self.finished_trajs = []
@@ -232,9 +234,18 @@ class SequenceWrapper(gym.Wrapper):
         else:
             action_shape = self.env.action_space.shape[-1]
         rl2_shape = action_shape + 1  # action + reward
+        obs_space = self.env.observation_space
+        if full_transition:
+            # extend obs space with _prev_<key> entries for (o_{t-1}, a_{t-1}, r_{t-1}, o_t) input
+            prev_obs_space = gym.spaces.Dict(
+                {f"_prev_{k}": v for k, v in obs_space.items()}
+            )
+            effective_obs_space = gym.spaces.Dict({**obs_space, **prev_obs_space})
+        else:
+            effective_obs_space = obs_space
         self.rl2_space = gym.spaces.Dict(
             {
-                "obs": self.env.observation_space,
+                "obs": effective_obs_space,
                 "rl2": gym.spaces.Box(
                     shape=(rl2_shape,),
                     dtype=np.float32,
@@ -243,6 +254,7 @@ class SequenceWrapper(gym.Wrapper):
                 ),
             }
         )
+        self._prev_obs_buffer = None
 
     @property
     def step_count(self):
@@ -256,9 +268,21 @@ class SequenceWrapper(gym.Wrapper):
     def random_traj_length(self):
         return random.randint(*self.save_every) if self.save_every else None
 
+    def _inject_prev_obs(self, timestep_obs: dict) -> dict:
+        """Add _prev_<key> entries to an obs dict using the tracked buffer."""
+        for k, v in self._prev_obs_buffer.items():
+            timestep_obs[f"_prev_{k}"] = v.copy()
+        return timestep_obs
+
     def reset(self, seed=None) -> Timestep:
         timestep, info = self.env.reset(seed=seed)
         assert timestep.batched_envs == self.batched_envs
+        if self.full_transition:
+            # Initialize prev_obs buffer to zeros (start of episode)
+            self._prev_obs_buffer = {
+                k: np.zeros_like(v) for k, v in timestep.obs.items()
+            }
+            timestep.obs = self._inject_prev_obs(timestep.obs)
         self._current_timestep = timestep.as_input()
         self.active_trajs = [
             Trajectory(timesteps=[t]) for t in split_batched_timestep(timestep)
@@ -275,6 +299,15 @@ class SequenceWrapper(gym.Wrapper):
         assert terminated.shape[0] == self.batched_envs
         assert truncated.shape[0] == self.batched_envs
         assert reward.shape[0] == self.batched_envs
+
+        if self.full_transition:
+            # Inject prev_obs before splitting / saving; then advance the buffer
+            if self._prev_obs_buffer is None:
+                self._prev_obs_buffer = {
+                    k: np.zeros_like(v) for k, v in timestep.obs.items()
+                }
+            timestep.obs = self._inject_prev_obs(timestep.obs)
+            new_prev = {k: v.copy() for k, v in timestep.obs.items() if not k.startswith("_prev_")}
 
         self.total_return += reward
         done = np.logical_or(terminated, truncated)
@@ -306,6 +339,12 @@ class SequenceWrapper(gym.Wrapper):
 
         if done.any():  # avoid a deepcopy if we can
             timestep = timestep.create_reset_version(done)
+
+        if self.full_transition:
+            # Update prev_obs buffer: zero out finished envs (they start a new episode)
+            for k in new_prev:
+                self._prev_obs_buffer[k] = new_prev[k].copy()
+                self._prev_obs_buffer[k][done] = 0.0
 
         # - if the env is running in a pool of async/sync envs, terminated/truncated will trigger a `reset`, redoing the reset logic already done here
         # - if the env is vectorized, dones will never be checked for a reset but *will* be used to reset the agent's hidden state
@@ -371,6 +410,7 @@ class EnvCreator:
     save_every_low: int
     save_every_high: int
     save_trajs_as: str
+    full_transition: bool = False
 
     def __post_init__(self):
         self.rl2_space = None
@@ -386,6 +426,7 @@ class EnvCreator:
             save_every=(self.save_every_low, self.save_every_high),
             save_trajs_to=self.save_trajs_to,
             save_trajs_as=self.save_trajs_as,
+            full_transition=self.full_transition,
         )
         self.rl2_space = env.rl2_space
         return env

@@ -64,6 +64,7 @@ if __name__ == "__main__":
     config[f"{mate_config_prefix}.d_model"] = args.memory_size
     config[f"{mate_config_prefix}.n_layers"] = args.memory_layers
     config[f"{mate_config_prefix}.proj"] = "hyper"
+    config[f"{mate_config_prefix}.obs_shortcut"] = True
 
     traj_encoder_type = MateTrajEncoder
 

@@ -642,6 +642,7 @@ class MateTrajEncoder(TrajEncoder):
         sigma_reparam: bool = True,
         normformer_norms: bool = True,
         proj: str = "hyper",
+        obs_shortcut: bool = False,
     ):
         super().__init__(tstep_dim, max_seq_len)
         assert proj in ("hyper", "mean"), (
@@ -653,6 +654,7 @@ class MateTrajEncoder(TrajEncoder):
         d_ff = d_ff or d_model * 4
         self.d_model = d_model
         self.proj = proj
+        self.obs_shortcut = obs_shortcut
 
         # --- Preprocessing: same as Transformer (pos_emb optional) ---
         self.inp = nn.Linear(tstep_dim, d_model)
@@ -684,10 +686,18 @@ class MateTrajEncoder(TrajEncoder):
         self.out_norm = ff.Normalization(norm, d_model)
 
         # --- Projection ---
-        if proj == "hyper":
-            self.init_emb = nn.Parameter(torch.randn(d_model))
+        # init_emb is used by both "hyper" and "mean" projections.
+        self.init_emb = nn.Parameter(torch.randn(d_model))
 
-        self._emb_dim = d_model
+        # --- Obs shortcut (mirrors Memory-RL's obs_shortcut / observ_embedder) ---
+        # A separate projection of the raw tstep embedding is concatenated with
+        # the MATE memory output, so the actor/critic sees both the current
+        # observation and the cumulative memory. emb_dim doubles to 2 * d_model.
+        if obs_shortcut:
+            self.shortcut_proj = nn.Linear(tstep_dim, d_model)
+            self._emb_dim = d_model * 2
+        else:
+            self._emb_dim = d_model
 
     @property
     def emb_dim(self) -> int:
@@ -761,16 +771,23 @@ class MateTrajEncoder(TrajEncoder):
             counts = prev_count + local_counts         # (B, T, 1)
             new_hidden_state = (cumsum[:, -1:, :], counts[:, -1:, :])
 
-        output = self.out_norm(cumsum)
-
         if self.proj == "hyper":
-            # Hypersphere projection: stable magnitude, directional info preserved.
+            # Hypersphere projection: normalize then scale to fixed magnitude.
+            output = self.out_norm(cumsum)
             output = output + self.init_emb
             output = output / output.norm(dim=-1, keepdim=True).clamp(min=1e-6) * np.sqrt(self.d_model)
         elif self.proj == "mean":
-            # Running mean: divide cumsum by cumulative step count t.
-            output = output + self.init_emb
+            # Running mean: (cumsum + init_emb) / t  — matches Memory-RL original formula.
+            # Do NOT apply out_norm here: LayerNorm would fix the cumsum magnitude to ~const,
+            # making the output shrink toward 0 as t grows and destroying the temporal signal.
+            output = cumsum + self.init_emb
             output = output / counts
+
+        if self.obs_shortcut:
+            # Concatenate a direct projection of the current tstep embedding so the
+            # actor/critic sees both the memory state and the current observation.
+            shortcut = self.shortcut_proj(seq)   # (B, T, d_model)
+            output = torch.cat([shortcut, output], dim=-1)  # (B, T, 2*d_model)
 
         return output, new_hidden_state
 

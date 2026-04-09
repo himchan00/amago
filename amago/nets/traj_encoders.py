@@ -81,7 +81,7 @@ class TrajEncoder(nn.Module, ABC):
             been trimmed to this length before reaching the TrajEncoder.
     """
 
-    def __init__(self, tstep_dim: int, max_seq_len: int):
+    def __init__(self, tstep_dim: int, max_seq_len: int, **kwargs):
         super().__init__()
         self.tstep_dim = tstep_dim
         self.max_seq_len = max_seq_len
@@ -643,6 +643,7 @@ class MateTrajEncoder(TrajEncoder):
         normformer_norms: bool = True,
         proj: str = "hyper",
         obs_shortcut: bool = False,
+        obs_shortcut_dim: Optional[int] = None,
     ):
         super().__init__(tstep_dim, max_seq_len)
         assert proj in ("hyper", "mean"), (
@@ -694,9 +695,12 @@ class MateTrajEncoder(TrajEncoder):
         # concatenates with the MATE memory output, so the actor/critic sees both
         # the current observation directly and the cumulative memory state.
         # emb_dim doubles to 2 * d_model.
-        # Uses LazyLinear because obs_dim is not known at init time (depends on env).
         if obs_shortcut:
-            self.shortcut_proj = nn.LazyLinear(d_model)
+            # obs_shortcut_dim is the flat dim of current obs (non-_prev_ keys),
+            # passed from BaseAgent.init_encoders where obs_space is known.
+            # Falls back to tstep_dim if not provided (e.g. standalone usage).
+            shortcut_in = obs_shortcut_dim if obs_shortcut_dim is not None else tstep_dim
+            self.shortcut_proj = nn.Linear(shortcut_in, d_model)
             self._emb_dim = d_model * 2
         else:
             self._emb_dim = d_model

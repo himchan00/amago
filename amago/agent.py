@@ -329,9 +329,22 @@ class BaseAgent(nn.Module, abc.ABC):
             obs_space=self.obs_space,
             rl2_space=self.rl2_space,
         )
+        # Compute the flat obs_dim (non-_prev_ keys only) so that traj_encoders
+        # with obs_shortcut can initialize a plain nn.Linear instead of LazyLinear.
+        import math, inspect
+        obs_shortcut_dim = sum(
+            math.prod(self.obs_space[k].shape)
+            for k in self.obs_space
+            if not k.startswith("_prev_")
+        )
+        # Only pass obs_shortcut_dim if the traj_encoder's __init__ accepts it,
+        # so other encoders (Transformer, RNN, ...) are not affected.
+        traj_enc_params = inspect.signature(self.traj_encoder_type.__init__).parameters
+        extra = {"obs_shortcut_dim": obs_shortcut_dim} if "obs_shortcut_dim" in traj_enc_params else {}
         self.traj_encoder = self.traj_encoder_type(
             tstep_dim=self.tstep_encoder.emb_dim,
             max_seq_len=self.max_seq_len,
+            **extra,
         )
 
     @property

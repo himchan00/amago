@@ -791,22 +791,10 @@ class MateTrajEncoder(TrajEncoder):
             output = output / counts
 
         if self.obs_shortcut:
-            # Use only current obs keys (not _prev_* keys) — mirrors Memory-RL's
-            # observ_embedder(o_t) which sees only the current observation.
-            if obs is not None:
-                current_obs = torch.cat(
-                    [
-                        v.flatten(start_dim=2).float()
-                        for k, v in sorted(obs.items())
-                        if not k.startswith("_prev_")
-                    ],
-                    dim=-1,
-                )  # (B, T, obs_dim)
-                shortcut = self.shortcut_proj(current_obs)  # (B, T, d_model)
-            else:
-                # fallback: no obs dict provided, use the full tstep embedding
-                shortcut = self.shortcut_proj(seq)
-            output = torch.cat([shortcut, output], dim=-1)  # (B, T, 2*d_model)
+            # shortcut_proj and emb_dim are set but the actual concat is done
+            # by BaseAgent._apply_traj_encoder, which has access to the raw obs
+            # dict at all call sites. Nothing to do here.
+            pass
 
         return output, new_hidden_state
 

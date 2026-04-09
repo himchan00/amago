@@ -347,6 +347,32 @@ class BaseAgent(nn.Module, abc.ABC):
             **extra,
         )
 
+    def _apply_traj_encoder(
+        self,
+        seq: torch.Tensor,
+        time_idxs,
+        hidden_state,
+        obs: dict = None,
+        log_dict: dict = None,
+    ):
+        """Thin wrapper around traj_encoder that appends the obs shortcut when needed."""
+        kwargs = {"seq": seq, "time_idxs": time_idxs, "hidden_state": hidden_state}
+        if log_dict is not None:
+            kwargs["log_dict"] = log_dict
+        s_rep, new_hidden = self.traj_encoder(**kwargs)
+        if getattr(self.traj_encoder, "obs_shortcut", False) and obs is not None:
+            current_obs = torch.cat(
+                [
+                    v.flatten(start_dim=2).float()
+                    for k, v in sorted(obs.items())
+                    if not k.startswith("_prev_")
+                ],
+                dim=-1,
+            )  # (B, T, obs_dim)
+            shortcut = self.traj_encoder.shortcut_proj(current_obs)  # (B, T, d_model)
+            s_rep = torch.cat([shortcut, s_rep], dim=-1)  # (B, T, 2*d_model)
+        return s_rep, new_hidden
+
     @property
     def state_dim(self) -> int:
         """Defines the effective "state" dimension for RL.
@@ -379,13 +405,8 @@ class BaseAgent(nn.Module, abc.ABC):
                 - Updated hidden state of the TrajEncoder.
         """
         tstep_emb = self.tstep_encoder(obs=obs, rl2s=rl2s)
-        # Pass raw obs to traj_encoder when it uses obs_shortcut, so it can
-        # project only the current observation (not the full tstep embedding).
-        extra = {}
-        if getattr(self.traj_encoder, "obs_shortcut", False):
-            extra["obs"] = obs
-        traj_emb_t, hidden_state = self.traj_encoder(
-            tstep_emb, time_idxs=time_idxs, hidden_state=hidden_state, **extra
+        traj_emb_t, hidden_state = self._apply_traj_encoder(
+            seq=tstep_emb, time_idxs=time_idxs, hidden_state=hidden_state, obs=obs
         )
         return traj_emb_t, hidden_state
 
@@ -817,8 +838,8 @@ class Agent(BaseAgent):
             :, 1:, ...
         ]
 
-        s_rep, _ = self.traj_encoder(
-            seq=o, time_idxs=batch.time_idxs, hidden_state=None
+        s_rep, _ = self._apply_traj_encoder(
+            seq=o, time_idxs=batch.time_idxs, hidden_state=None, obs=batch.obs
         )
 
         a_dist = self.actor(s_rep, straight_from_obs=straight_from_obs)
@@ -963,7 +984,10 @@ class Agent(BaseAgent):
         ## Sequence Embedding ##
         ########################
         # one trajectory encoder forward pass
-        s_rep, hidden_state = self.traj_encoder(seq=o, time_idxs=batch.time_idxs, hidden_state=None, log_dict=active_log_dict)
+        s_rep, hidden_state = self._apply_traj_encoder(
+            seq=o, time_idxs=batch.time_idxs, hidden_state=None,
+            obs=batch.obs, log_dict=active_log_dict
+        )
         assert s_rep.shape == (B, L, D_emb)
 
         ################
@@ -1321,8 +1345,8 @@ class MultiTaskAgent(Agent):
             :, 1:, ...
         ]
 
-        s_rep, _ = self.traj_encoder(
-            seq=o, time_idxs=batch.time_idxs, hidden_state=None
+        s_rep, _ = self._apply_traj_encoder(
+            seq=o, time_idxs=batch.time_idxs, hidden_state=None, obs=batch.obs
         )
 
         a_dist = self.actor(s_rep, straight_from_obs=straight_from_obs)
@@ -1397,7 +1421,10 @@ class MultiTaskAgent(Agent):
         ########################
         ## Sequence Embedding ##
         ########################
-        s_rep, hidden_state = self.traj_encoder(seq=o, time_idxs=batch.time_idxs, hidden_state=None, log_dict=active_log_dict)
+        s_rep, hidden_state = self._apply_traj_encoder(
+            seq=o, time_idxs=batch.time_idxs, hidden_state=None,
+            obs=batch.obs, log_dict=active_log_dict
+        )
         assert s_rep.shape == (B, L, D_emb)
 
         ################

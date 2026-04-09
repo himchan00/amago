@@ -690,11 +690,13 @@ class MateTrajEncoder(TrajEncoder):
         self.init_emb = nn.Parameter(torch.randn(d_model))
 
         # --- Obs shortcut (mirrors Memory-RL's obs_shortcut / observ_embedder) ---
-        # A separate projection of the raw tstep embedding is concatenated with
-        # the MATE memory output, so the actor/critic sees both the current
-        # observation and the cumulative memory. emb_dim doubles to 2 * d_model.
+        # Projects only the *current* observation (non-_prev_ keys) to d_model and
+        # concatenates with the MATE memory output, so the actor/critic sees both
+        # the current observation directly and the cumulative memory state.
+        # emb_dim doubles to 2 * d_model.
+        # Uses LazyLinear because obs_dim is not known at init time (depends on env).
         if obs_shortcut:
-            self.shortcut_proj = nn.Linear(tstep_dim, d_model)
+            self.shortcut_proj = nn.LazyLinear(d_model)
             self._emb_dim = d_model * 2
         else:
             self._emb_dim = d_model
@@ -743,6 +745,7 @@ class MateTrajEncoder(TrajEncoder):
         time_idxs: Optional[torch.Tensor] = None,
         hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         log_dict: Optional[dict] = None,
+        obs: Optional[dict] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # seq: (B, T, tstep_dim)
         assert self.position_embedding is None or time_idxs is not None, (
@@ -784,9 +787,21 @@ class MateTrajEncoder(TrajEncoder):
             output = output / counts
 
         if self.obs_shortcut:
-            # Concatenate a direct projection of the current tstep embedding so the
-            # actor/critic sees both the memory state and the current observation.
-            shortcut = self.shortcut_proj(seq)   # (B, T, d_model)
+            # Use only current obs keys (not _prev_* keys) — mirrors Memory-RL's
+            # observ_embedder(o_t) which sees only the current observation.
+            if obs is not None:
+                current_obs = torch.cat(
+                    [
+                        v.flatten(start_dim=2).float()
+                        for k, v in sorted(obs.items())
+                        if not k.startswith("_prev_")
+                    ],
+                    dim=-1,
+                )  # (B, T, obs_dim)
+                shortcut = self.shortcut_proj(current_obs)  # (B, T, d_model)
+            else:
+                # fallback: no obs dict provided, use the full tstep embedding
+                shortcut = self.shortcut_proj(seq)
             output = torch.cat([shortcut, output], dim=-1)  # (B, T, 2*d_model)
 
         return output, new_hidden_state

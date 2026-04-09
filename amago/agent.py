@@ -366,8 +366,13 @@ class BaseAgent(nn.Module, abc.ABC):
                 - Updated hidden state of the TrajEncoder.
         """
         tstep_emb = self.tstep_encoder(obs=obs, rl2s=rl2s)
+        # Pass raw obs to traj_encoder when it uses obs_shortcut, so it can
+        # project only the current observation (not the full tstep embedding).
+        extra = {}
+        if getattr(self.traj_encoder, "obs_shortcut", False):
+            extra["obs"] = obs
         traj_emb_t, hidden_state = self.traj_encoder(
-            tstep_emb, time_idxs=time_idxs, hidden_state=hidden_state
+            tstep_emb, time_idxs=time_idxs, hidden_state=hidden_state, **extra
         )
         return traj_emb_t, hidden_state
 

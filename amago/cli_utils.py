@@ -186,6 +186,16 @@ def add_common_cli(parser: ArgumentParser) -> ArgumentParser:
         choices=["learn", "collect", "both"],
         help="Simple max-throughput async mode. Start the command with `--mode collect` 1+ times, and then start the same command with `--mode learner` in another terminal. Defaults to alternating collect/train steps.",
     )
+    parser.add_argument(
+        "--full_transition",
+        action="store_true",
+        help="Include previous observation in the TstepEncoder input (obs + prev_obs + prev_action + prev_reward).",
+    )
+    parser.add_argument(
+        "--obs_shortcut",
+        action="store_true",
+        help="Concatenate a direct observation embedding to the TrajEncoder output for actor/critic.",
+    )
     return parser
 
 
@@ -368,6 +378,7 @@ def create_experiment_from_cli(
     exploration_wrapper_type: type[ExplorationWrapper] = EpsilonGreedy,
     experiment_type: type[amago.Experiment] = amago.Experiment,
     dataset: Optional[RLDataset] = None,
+    full_transition: bool = False,
     **extra_experiment_kwargs,
 ) -> amago.Experiment:
     """
@@ -416,6 +427,7 @@ def create_experiment_from_cli(
             dset_root=cli.buffer_dir,
             dset_name=run_name,
             dset_max_size=cli.dset_max_size,
+            full_transition=full_transition,
         )
 
     experiment = experiment_type(
@@ -443,6 +455,7 @@ def create_experiment_from_cli(
         ckpt_interval=cli.ckpt_interval,
         mixed_precision=cli.mixed_precision,
         env_mode=cli.env_mode,
+        full_transition=full_transition,
         **extra_experiment_kwargs,
     )
 

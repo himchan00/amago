@@ -303,7 +303,14 @@ class CNNTstepEncoder(TstepEncoder):
             cnn.DrQv2Aug(4, channels_first=channels_first) if drqv2_aug else lambda x: x
         )
         self.using_aug = drqv2_aug
+        self._has_prev_obs = f"_prev_{obs_key}" in obs_space
+        self._channels_first = channels_first
         obs_shape = self.obs_space[obs_key].shape
+        if self._has_prev_obs:
+            if channels_first:
+                obs_shape = (obs_shape[0] * 2, *obs_shape[1:])
+            else:
+                obs_shape = (*obs_shape[:-1], obs_shape[-1] * 2)
         self.cnn = cnn_type(
             img_shape=obs_shape,
             channels_first=channels_first,
@@ -328,6 +335,12 @@ class CNNTstepEncoder(TstepEncoder):
         log_dict: Optional[dict] = None,
     ) -> torch.Tensor:
         img = obs[self.obs_key].float()
+        if self._has_prev_obs:
+            prev_key = f"_prev_{self.obs_key}"
+            if prev_key in obs:
+                prev_img = obs[prev_key].float()
+                cat_dim = 2 if self._channels_first else -1
+                img = torch.cat((img, prev_img), dim=cat_dim)
         B, L, *_ = img.shape
         if self.using_aug and self.training:
             og_split = max(min(math.ceil(B * (1.0 - self.aug_pct_of_batch)), B - 1), 0)
@@ -344,6 +357,62 @@ class CNNTstepEncoder(TstepEncoder):
         add_activation_log("tstep_encoder_prenorm", merge, log_dict)
         out = self.out_norm(merge)
         return out
+
+    @property
+    def emb_dim(self):
+        return self._emb_dim
+
+
+@gin.configurable
+class FFObsEncoder(nn.Module):
+    """MLP encoder for raw observations (no rl2s). Used by obs_shortcut.
+
+    Filters out `_prev_` keys and only encodes current observations.
+    """
+
+    def __init__(
+        self,
+        obs_space: gym.Space,
+        n_layers: int = 2,
+        d_hidden: int = 512,
+        d_output: int = 256,
+        norm: Optional[str] = None,
+        out_norm: str = "layer",
+        activation: str = "leaky_relu",
+        normalize_inputs: bool = True,
+    ):
+        super().__init__()
+        self.obs_keys = sorted(
+            [k for k in obs_space.keys() if not k.startswith("_prev_")]
+        )
+        flat_obs_shape = sum(
+            math.prod(obs_space[key].shape) for key in self.obs_keys
+        )
+        self.in_norm = InputNorm(flat_obs_shape, skip=not normalize_inputs)
+        self.base = ff.MLP(
+            d_inp=flat_obs_shape,
+            d_hidden=d_hidden,
+            n_layers=n_layers,
+            d_output=d_output,
+            activation=activation,
+            normalization=norm,
+        )
+        self.out_norm = ff.Normalization(out_norm, d_output)
+        self._emb_dim = d_output
+
+    def forward(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
+        arrs = []
+        for key in self.obs_keys:
+            a = obs[key]
+            if a.ndim == 2:
+                a = a.unsqueeze(-1)
+            arrs.append(a.flatten(start_dim=2))
+        flat_obs = torch.cat(arrs, dim=-1).float()
+        if self.training:
+            self.in_norm.update_stats(flat_obs)
+        flat_obs = self.in_norm(flat_obs)
+        out = self.base(flat_obs)
+        return self.out_norm(out)
 
     @property
     def emb_dim(self):

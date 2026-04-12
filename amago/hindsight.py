@@ -81,6 +81,11 @@ class Timestep:
         new.time_idx[reset_idxs] = 0
         new.terminal[reset_idxs] = False
         new.prev_action[reset_idxs] = 0
+        for key in list(new.obs.keys()):
+            if key.startswith("_prev_"):
+                base_key = key[len("_prev_"):]
+                if base_key in new.obs:
+                    new.obs[key][reset_idxs] = new.obs[base_key][reset_idxs]
         return new
 
 

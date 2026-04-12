@@ -46,7 +46,8 @@ if __name__ == "__main__":
         layers=args.memory_layers,
     )
     agent_type = cli_utils.switch_agent(
-        config, args.agent_type, reward_multiplier=1.0, num_critics=4
+        config, args.agent_type, reward_multiplier=1.0, num_critics=4,
+        obs_shortcut=args.obs_shortcut,
     )
     exploration_type = cli_utils.switch_exploration(
         config, "bilevel", steps_anneal=2_000_000, rollout_horizon=args.k * 500
@@ -76,6 +77,7 @@ if __name__ == "__main__":
             learning_rate=5e-4,
             grad_clip=2.0,
             exploration_wrapper_type=exploration_type,
+            full_transition=args.full_transition,
         )
 
         experiment = cli_utils.switch_async_mode(experiment, args.mode)

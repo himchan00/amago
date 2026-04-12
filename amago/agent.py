@@ -17,7 +17,7 @@ import gin
 import gymnasium as gym
 
 from amago.loading import Batch, MAGIC_PAD_VAL
-from amago.nets.tstep_encoders import TstepEncoder
+from amago.nets.tstep_encoders import TstepEncoder, FFObsEncoder
 from amago.nets.traj_encoders import TrajEncoder
 from amago.nets import actor_critic
 from amago.nets.policy_dists import DiscreteLikeContinuous
@@ -333,6 +333,14 @@ class BaseAgent(nn.Module, abc.ABC):
             tstep_dim=self.tstep_encoder.emb_dim,
             max_seq_len=self.max_seq_len,
         )
+        if getattr(self, "obs_shortcut", False):
+            shortcut_space = gym.spaces.Dict(
+                {k: v for k, v in self.obs_space.items() if not k.startswith("_prev_")}
+            )
+            self.obs_encoder = FFObsEncoder(
+                obs_space=shortcut_space,
+                d_output=self.traj_encoder.emb_dim,
+            )
 
     @property
     def state_dim(self) -> int:
@@ -342,7 +350,20 @@ class BaseAgent(nn.Module, abc.ABC):
         is assumed to be memory-free. Typically the dimension of the output
         of the TrajEncoder.
         """
-        return self.traj_encoder.emb_dim
+        dim = self.traj_encoder.emb_dim
+        if getattr(self, "obs_shortcut", False):
+            dim += self.obs_encoder.emb_dim
+        return dim
+
+    def _apply_obs_shortcut(
+        self, s_rep: torch.Tensor, obs: dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+        """Concatenate obs embedding to sequence model output if obs_shortcut is enabled."""
+        if getattr(self, "obs_shortcut", False):
+            filtered = {k: v for k, v in obs.items() if not k.startswith("_prev_")}
+            obs_emb = self.obs_encoder(filtered)
+            s_rep = torch.cat((s_rep, obs_emb), dim=-1)
+        return s_rep
 
     def get_state_embedding(
         self,
@@ -369,6 +390,7 @@ class BaseAgent(nn.Module, abc.ABC):
         traj_emb_t, hidden_state = self.traj_encoder(
             tstep_emb, time_idxs=time_idxs, hidden_state=hidden_state
         )
+        traj_emb_t = self._apply_obs_shortcut(traj_emb_t, obs)
         return traj_emb_t, hidden_state
 
     @abc.abstractmethod
@@ -624,7 +646,9 @@ class Agent(BaseAgent):
         actor_type: Type[actor_critic.BaseActorHead] = actor_critic.Actor,
         critic_type: Type[actor_critic.BaseCriticHead] = actor_critic.NCritics,
         pass_obs_keys_to_actor: Optional[Iterable[str]] = None,
+        obs_shortcut: bool = False,
     ):
+        self.obs_shortcut = obs_shortcut
         super().__init__(
             obs_space=obs_space,
             rl2_space=rl2_space,
@@ -695,12 +719,15 @@ class Agent(BaseAgent):
     @property
     def trainable_params(self):
         """Iterable over all trainable parameters, which should be passed to the optimizer."""
-        return itertools.chain(
+        params = [
             self.tstep_encoder.parameters(),
             self.traj_encoder.parameters(),
             self.critics.parameters(),
             self.actor.parameters(),
-        )
+        ]
+        if getattr(self, "obs_shortcut", False):
+            params.append(self.obs_encoder.parameters())
+        return itertools.chain(*params)
 
     def hard_sync_targets(self):
         """Hard copy online actor/critics to target actor/critics"""
@@ -802,6 +829,7 @@ class Agent(BaseAgent):
         s_rep, _ = self.traj_encoder(
             seq=o, time_idxs=batch.time_idxs, hidden_state=None
         )
+        s_rep = self._apply_obs_shortcut(s_rep, batch.obs)
 
         a_dist = self.actor(s_rep, straight_from_obs=straight_from_obs)
 
@@ -947,6 +975,7 @@ class Agent(BaseAgent):
         # one trajectory encoder forward pass
         s_rep, hidden_state = self.traj_encoder(seq=o, time_idxs=batch.time_idxs, hidden_state=None, log_dict=active_log_dict)
         assert s_rep.shape == (B, L, D_emb)
+        s_rep = self._apply_obs_shortcut(s_rep, batch.obs)
 
         ################
         ## a ~ \pi(s) ##
@@ -1239,6 +1268,7 @@ class MultiTaskAgent(Agent):
         actor_type: Type[actor_critic.BaseActorHead] = actor_critic.Actor,
         critic_type: Type[actor_critic.BaseCriticHead] = actor_critic.NCriticsTwoHot,
         pass_obs_keys_to_actor: Optional[Iterable[str]] = None,
+        obs_shortcut: bool = False,
     ):
         super().__init__(
             obs_space=obs_space,
@@ -1266,6 +1296,7 @@ class MultiTaskAgent(Agent):
             actor_type=actor_type,
             critic_type=critic_type,
             pass_obs_keys_to_actor=pass_obs_keys_to_actor,
+            obs_shortcut=obs_shortcut,
         )
 
     def _sample_k_actions(self, dist, k: int):
@@ -1306,6 +1337,7 @@ class MultiTaskAgent(Agent):
         s_rep, _ = self.traj_encoder(
             seq=o, time_idxs=batch.time_idxs, hidden_state=None
         )
+        s_rep = self._apply_obs_shortcut(s_rep, batch.obs)
 
         a_dist = self.actor(s_rep, straight_from_obs=straight_from_obs)
         if self.discrete:
@@ -1381,6 +1413,7 @@ class MultiTaskAgent(Agent):
         ########################
         s_rep, hidden_state = self.traj_encoder(seq=o, time_idxs=batch.time_idxs, hidden_state=None, log_dict=active_log_dict)
         assert s_rep.shape == (B, L, D_emb)
+        s_rep = self._apply_obs_shortcut(s_rep, batch.obs)
 
         ################
         ## a ~ \pi(s) ##

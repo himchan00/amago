@@ -138,6 +138,7 @@ class Experiment:
     sample_actions_train: bool = True
     sample_actions_val: bool = True
     force_reset_train_envs_every: Optional[int] = None
+    full_transition: bool = False
 
     #############
     ## Logging ##
@@ -317,6 +318,7 @@ class Experiment:
             save_trajs_as=self.save_trajs_as,
             save_every_low=save_every_low,
             save_every_high=save_every_high,
+            full_transition=self.full_transition,
         )
         make_train = [
             EnvCreator(
@@ -712,6 +714,7 @@ class Experiment:
                 m(),
                 save_trajs_to=save_trajs_to,
                 save_every=None,
+                full_transition=self.full_transition,
             )
 
         par_kwargs = dict()

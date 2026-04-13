@@ -724,33 +724,44 @@ class MateTrajEncoder(TrajEncoder):
 
     def init_hidden_state(
         self, batch_size: int, device: torch.device
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # (cumulative sum h_t, step count t); both start at zero.
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Sliding window ring buffer — mirrors Transformer KV-cache.
+        # Stores the last max_seq_len post-FFN embeddings so the cumsum
+        # seen at inference stays within the distribution seen during training.
+        # (z_ring, ring_sum, ptr, count)
+        #   z_ring  : (B, max_seq_len, d_model) — circular buffer of z vectors
+        #   ring_sum: (B, d_model)              — running sum of valid entries
+        #   ptr     : (B,) int64               — next write position
+        #   count   : (B,) int64               — valid entries (capped at max_seq_len)
         return (
-            torch.zeros((batch_size, 1, self.d_model), dtype=torch.float32, device=device),
-            torch.zeros((batch_size, 1, 1), dtype=torch.float32, device=device),
+            torch.zeros((batch_size, self.max_seq_len, self.d_model), dtype=torch.float32, device=device),
+            torch.zeros((batch_size, self.d_model), dtype=torch.float32, device=device),
+            torch.zeros((batch_size,), dtype=torch.int64, device=device),
+            torch.zeros((batch_size,), dtype=torch.int64, device=device),
         )
 
     def reset_hidden_state(
         self,
-        hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        hidden_state: Optional[Tuple],
         dones: np.ndarray,
-    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Optional[Tuple]:
         if hidden_state is None:
             return None
-        cumsum, count = hidden_state
-        cumsum[dones] = 0.0
-        count[dones] = 0.0
-        return (cumsum, count)
+        z_ring, ring_sum, ptr, count = hidden_state
+        z_ring[dones] = 0.0
+        ring_sum[dones] = 0.0
+        ptr[dones] = 0
+        count[dones] = 0
+        return (z_ring, ring_sum, ptr, count)
 
     def forward(
         self,
         seq: torch.Tensor,
         time_idxs: Optional[torch.Tensor] = None,
-        hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        hidden_state: Optional[Tuple] = None,
         log_dict: Optional[dict] = None,
         obs: Optional[dict] = None,
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> Tuple[torch.Tensor, Optional[Tuple]]:
         # seq: (B, T, tstep_dim)
         assert self.position_embedding is None or time_idxs is not None, (
             "time_idxs is required when pos_emb != 'none'."
@@ -767,16 +778,40 @@ class MateTrajEncoder(TrajEncoder):
         local_counts = torch.arange(1, T + 1, device=seq.device, dtype=z.dtype).view(1, T, 1)
 
         if hidden_state is None:
-            # Training: cumsum from zero over the full window.
+            # Training: standard prefix-sum over the sampled window (unchanged).
             cumsum = z.cumsum(dim=1)       # (B, T, d_model)
             counts = local_counts          # (1, T, 1)
             new_hidden_state = None
         else:
-            # Inference: continue the running sum and count from stored state.
-            prev_cumsum, prev_count = hidden_state
-            cumsum = prev_cumsum + z.cumsum(dim=1)     # (B, T, d_model)
-            counts = prev_count + local_counts         # (B, T, 1)
-            new_hidden_state = (cumsum[:, -1:, :], counts[:, -1:, :])
+            # Inference: sliding window cumsum — mirrors Transformer KV-cache roll_back.
+            # Only the last max_seq_len z vectors contribute to the sum, so the
+            # cumsum distribution matches what was seen during training.
+            z_ring, ring_sum, ptr, count = hidden_state
+            batch_idx = torch.arange(z.shape[0], device=z.device)
+
+            cumsum_steps = []
+            count_steps  = []
+            for t_offset in range(T):
+                z_t = z[:, t_offset, :]  # (B, D)
+
+                # When ring is full, subtract the entry about to be overwritten.
+                is_full = (count >= self.max_seq_len).float().unsqueeze(-1)  # (B, 1)
+                oldest  = z_ring[batch_idx, ptr]                             # (B, D)
+                ring_sum = ring_sum - oldest * is_full + z_t
+
+                # Write z_t into the ring at the current write head.
+                z_ring[batch_idx, ptr] = z_t.detach()
+
+                # Advance write pointer (circular) and update count.
+                ptr   = (ptr + 1) % self.max_seq_len
+                count = torch.clamp(count + 1, max=self.max_seq_len)
+
+                cumsum_steps.append(ring_sum.unsqueeze(1))        # (B, 1, D)
+                count_steps.append(count.view(-1, 1, 1).float())  # (B, 1, 1)
+
+            cumsum = torch.cat(cumsum_steps, dim=1)  # (B, T, D)
+            counts = torch.cat(count_steps,  dim=1)  # (B, T, 1)
+            new_hidden_state = (z_ring, ring_sum, ptr, count)
 
         if self.proj == "hyper":
             # Hypersphere projection: normalize then scale to fixed magnitude.

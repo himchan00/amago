@@ -691,6 +691,7 @@ class MATETrajEncoder(TrajEncoder):
         )
         self.init_emb = nn.Parameter(torch.randn(d_model))
         self.use_gate = use_gate
+        print("Use gate in MATE:", use_gate)
         if use_gate:
             self.gate = ff.MLP(
                 d_inp=d_model,

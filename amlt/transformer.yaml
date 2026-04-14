@@ -1,9 +1,9 @@
 description: >
-  AMAGO ML45 (MetaWorld) - multi-GPU (4x A100)
+  ML45 - transformer ablations: full transition, obs shortcut, and obs shortcut scale
 
 env_defaults:
   NODES: 1
-  GPUS: 4
+  GPUS: 1
   MEM: 80
   BASE_DIR: /mnt/v-hihwang/projects/amago
 
@@ -47,7 +47,7 @@ code:
   local_dir: $CONFIG_DIR/..
 
 jobs:
-  - name: ml45_vanilla_4gpu
+  - name: transformer
     sku: ${NODES}x${MEM}G${GPUS}-A100
     process_count_per_node: 1
     sla_tier: Premium
@@ -64,9 +64,8 @@ jobs:
       - "export C_INCLUDE_PATH=/home/aiscuser/.conda/envs/amago/include:$$C_INCLUDE_PATH"
       - "export LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:$$LIBRARY_PATH"
       - conda run --no-capture-output --name amago
-          accelerate launch --num_processes=4 --mixed_precision=no
-          examples/07_metaworld.py
-          --run_name metaworld_ml45_vanilla_4gpu
+          python examples/07_metaworld.py
+          --run_name transformer
           --benchmark ml45
           --buffer_dir ${BASE_DIR}/buffer
           --parallel_actors 40
@@ -79,7 +78,7 @@ jobs:
           --epochs 5000
           --val_interval 40
 
-  - name: ml45_full_trans_obs_sc_scale_tstep_4gpu
+  - name: transformer_full_trans_obs_sc_scale_tstep
     sku: ${NODES}x${MEM}G${GPUS}-A100
     process_count_per_node: 1
     sla_tier: Premium
@@ -96,9 +95,8 @@ jobs:
       - "export C_INCLUDE_PATH=/home/aiscuser/.conda/envs/amago/include:$$C_INCLUDE_PATH"
       - "export LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:$$LIBRARY_PATH"
       - conda run --no-capture-output --name amago
-          accelerate launch --num_processes=4 --mixed_precision=no
-          examples/07_metaworld.py
-          --run_name metaworld_ml45_full_trans_obs_sc_tstep_4gpu
+          python examples/07_metaworld.py
+          --run_name transformer_full_trans_obs_sc_scale_tstep
           --benchmark ml45
           --buffer_dir ${BASE_DIR}/buffer
           --parallel_actors 40
@@ -114,7 +112,7 @@ jobs:
           --obs_shortcut
           --obs_shortcut_scale tstep
 
-  - name: ml45_full_trans_obs_sc_scale_full_4gpu
+  - name: transformer_full_trans_obs_sc_scale_full
     sku: ${NODES}x${MEM}G${GPUS}-A100
     process_count_per_node: 1
     sla_tier: Premium
@@ -131,9 +129,8 @@ jobs:
       - "export C_INCLUDE_PATH=/home/aiscuser/.conda/envs/amago/include:$$C_INCLUDE_PATH"
       - "export LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:$$LIBRARY_PATH"
       - conda run --no-capture-output --name amago
-          accelerate launch --num_processes=4 --mixed_precision=no
-          examples/07_metaworld.py
-          --run_name metaworld_ml45_full_trans_obs_sc_scale_full_4gpu
+          python examples/07_metaworld.py
+          --run_name transformer_full_trans_obs_sc_scale_full
           --benchmark ml45
           --buffer_dir ${BASE_DIR}/buffer
           --parallel_actors 40

@@ -297,6 +297,37 @@ python examples/07_metaworld.py \
     --obs_shortcut_scale full
 ```
 
+### Resuming from a Checkpoint
+
+Use `--ckpt <epoch>` to resume training from a previously saved checkpoint. The epoch number must match one saved by `--ckpt_interval` (default: 50).
+
+```bash
+# Resume training from epoch 200
+python examples/07_metaworld.py \
+    --run_name metaworld_ml45 \
+    --benchmark ml45 \
+    --buffer_dir ./buffer \
+    --ckpt 200 \
+    --parallel_actors 40 \
+    --memory_size 320 \
+    --timesteps_per_epoch 1501 \
+    --agent_type multitask \
+    --max_seq_len 256 \
+    --memory_layers 3 \
+    --dset_max_size 25000 \
+    --epochs 5000 \
+    --val_interval 40 \
+    --traj_encoder mate \
+    --full_transition \
+    --obs_shortcut \
+    --obs_shortcut_scale full
+```
+
+This restores the full training state (model weights, optimizer, and LR scheduler) via HuggingFace `accelerate`. The replay buffer is disk-based, so previously collected trajectories are automatically available. Make sure `--run_name` and `--buffer_dir` match the original run so the checkpoint path resolves correctly.
+
+> [!NOTE]
+> Resuming creates a new wandb run rather than continuing the previous one, so logged metrics will appear in a separate run on the dashboard.
+
 ### `--full_transition`
 
 Enriches the TstepEncoder input by including the previous observation alongside the current one. When enabled, `_prev_<key>` entries are added to the observation dict, so the TstepEncoder receives the full transition tuple `(obs, prev_obs, prev_action, prev_reward)` instead of just `(obs, prev_action, prev_reward)`. For CNN-based encoders, the previous image is concatenated along the channel dimension. Backward compatible with data collected without this flag.
@@ -330,10 +361,7 @@ Controls the capacity of the obs shortcut encoder:
 Key properties:
 - **O(1) per-step inference** — hidden state is a running `(cumsum, count)` pair; no KV cache needed.
 - **Controlled Transformer ablation** — same FFN blocks; only the aggregation mechanism differs (cumulative average vs. attention).
-- **Gating** — `use_gate=True` adds a learned per-timestep gate that modulates each step's contribution to the running average. Enable via CLI:
-  ```bash
-  --gin_bindings="amago.nets.traj_encoders.MATETrajEncoder.use_gate=True"
-  ```
+- **Gating** — `--use_gate` adds a learned per-timestep gate for mate that modulates each step's contribution to the running average.
 - `--memory_size` and `--memory_layers` map to `d_model` and `n_layers` (same convention as the Transformer).
 
 

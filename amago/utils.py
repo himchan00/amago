@@ -214,23 +214,23 @@ def gin_as_wandb_config() -> dict:
     return params_dict
 
 
-def get_grad_norm(model: nn.Module) -> float:
+def get_grad_norm(model: nn.Module):
     """Get the (L2) norm of the gradients for a pytorch module.
+
+    Computes entirely on GPU, returning a detached tensor to avoid
+    GPU-CPU synchronization. The scalar conversion happens at log time.
 
     Args:
         model: Pytorch module.
     """
-    total_norm = 0.0
+    norms = []
     for p in model.parameters():
-        try:
-            param = p.grad.data
-        except AttributeError:
-            continue
-        else:
-            param_norm = param.norm(2)
-            total_norm += param_norm.item() ** 2
-    total_norm = total_norm ** (1.0 / 2)
-    return total_norm
+        if p.grad is not None:
+            norms.append(p.grad.data.norm(2))
+    if len(norms) == 0:
+        return 0.0
+    total_norm = torch.stack(norms).norm(2)
+    return total_norm.detach()
 
 
 def retry_load_checkpoint(ckpt_path, map_location, tries: int = 10):

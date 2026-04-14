@@ -185,6 +185,12 @@ class Experiment:
     mixed_precision: str = "no"
 
     def __post_init__(self):
+        # Performance: enable TF32 and cuDNN autotuning globally
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+
         self.accelerator = Accelerator(
             gradient_accumulation_steps=self.batches_per_update,
             device_placement=True,
@@ -460,6 +466,8 @@ class Experiment:
             num_workers=self.dloader_workers,
             collate_fn=RLData_pad_collate,
             pin_memory=True,
+            persistent_workers=self.dloader_workers > 0,
+            prefetch_factor=2 if self.dloader_workers > 0 else None,
         )
         self.train_dloader = self.accelerator.prepare(train_dloader)
         return self.train_dloader

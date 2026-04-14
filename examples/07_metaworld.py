@@ -22,6 +22,11 @@ def add_cli(parser):
         action="store_true",
         help="hides the 'rl2 info' (previous actions, rewards)",
     )
+    parser.add_argument(
+        "--use_gate",
+        action="store_true",
+        help="Enable learned per-step gating in MATE trajectory encoder.",
+    )
     return parser
 
 
@@ -30,6 +35,8 @@ if __name__ == "__main__":
     cli_utils.add_common_cli(parser)
     add_cli(parser)
     args = parser.parse_args()
+    if args.use_gate:
+        assert args.traj_encoder == "mate", "Gating is only supported for MATE trajectory encoder."
 
     config = {
         "amago.nets.tstep_encoders.FFTstepEncoder.hide_rl2s": args.hide_rl2s,
@@ -44,6 +51,7 @@ if __name__ == "__main__":
         arch=args.traj_encoder,
         memory_size=args.memory_size,
         layers=args.memory_layers,
+        **({"use_gate": args.use_gate} if args.traj_encoder == "mate" else {}),
     )
     agent_type = cli_utils.switch_agent(
         config, args.agent_type, reward_multiplier=1.0, num_critics=4,

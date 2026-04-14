@@ -136,13 +136,13 @@ class Batch:
     actions: torch.Tensor
     time_idxs: torch.Tensor
 
-    def to(self, device):
-        self.obs = {k: v.to(device) for k, v in self.obs.items()}
-        self.rl2s = self.rl2s.to(device)
-        self.rews = self.rews.to(device)
-        self.dones = self.dones.to(device)
-        self.actions = self.actions.to(device)
-        self.time_idxs = self.time_idxs.to(device)
+    def to(self, device, non_blocking=True):
+        self.obs = {k: v.to(device, non_blocking=non_blocking) for k, v in self.obs.items()}
+        self.rl2s = self.rl2s.to(device, non_blocking=non_blocking)
+        self.rews = self.rews.to(device, non_blocking=non_blocking)
+        self.dones = self.dones.to(device, non_blocking=non_blocking)
+        self.actions = self.actions.to(device, non_blocking=non_blocking)
+        self.time_idxs = self.time_idxs.to(device, non_blocking=non_blocking)
         return self
 
 
@@ -699,7 +699,7 @@ class DiskTrajDataset(RLDataset):
         time_idxs = torch.from_numpy(traj.time_idxs).long()
         if self.full_transition:
             base_keys = [k for k in obs if not k.startswith("_prev_")]
-            ep_starts = (time_idxs == 0)
+            ep_starts = (time_idxs[:, 0] == 0)
             for k in base_keys:
                 prev_key = f"_prev_{k}"
                 if prev_key not in obs:

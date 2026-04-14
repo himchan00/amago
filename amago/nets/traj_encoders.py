@@ -683,9 +683,6 @@ class MateTrajEncoder(TrajEncoder):
             ]
         )
 
-        # --- Final norm: same as Transformer's output norm ---
-        self.out_norm = ff.Normalization(norm, d_model)
-
         # --- Projection ---
         # init_emb is used by both "hyper" and "mean" projections.
         self.init_emb = nn.Parameter(torch.randn(d_model))
@@ -778,14 +775,12 @@ class MateTrajEncoder(TrajEncoder):
         local_counts = torch.arange(1, T + 1, device=seq.device, dtype=z.dtype).view(1, T, 1)
 
         if hidden_state is None:
-            # Training: standard prefix-sum over the sampled window (unchanged).
+            # Training: standard prefix-sum over the sampled window.
             cumsum = z.cumsum(dim=1)       # (B, T, d_model)
             counts = local_counts          # (1, T, 1)
             new_hidden_state = None
         else:
             # Inference: sliding window cumsum — mirrors Transformer KV-cache roll_back.
-            # Only the last max_seq_len z vectors contribute to the sum, so the
-            # cumsum distribution matches what was seen during training.
             z_ring, ring_sum, ptr, count = hidden_state
             batch_idx = torch.arange(z.shape[0], device=z.device)
 
@@ -814,9 +809,11 @@ class MateTrajEncoder(TrajEncoder):
             new_hidden_state = (z_ring, ring_sum, ptr, count)
 
         if self.proj == "hyper":
-            # Hypersphere projection: normalize then scale to fixed magnitude.
-            output = self.out_norm(cumsum)
-            output = output + self.init_emb
+            # Hypersphere projection: (cumsum + init_emb) normalized to hypersphere.
+            # No LayerNorm on cumsum: cumsum magnitude grows with t, which lets
+            # init_emb dominate early steps and actual memory dominate later —
+            # matching the original Memory-RL MATE (no norm before projection).
+            output = cumsum + self.init_emb
             output = output / output.norm(dim=-1, keepdim=True).clamp(min=1e-6) * np.sqrt(self.d_model)
         elif self.proj == "mean":
             # Running mean: (cumsum + init_emb) / t  — matches Memory-RL original formula.

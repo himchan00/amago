@@ -99,7 +99,7 @@ if __name__ == "__main__":
             learning_rate=5e-4,
             grad_clip=2.0,
             exploration_wrapper_type=exploration_type,
-            full_transition=True,
+            full_transition=False,
         )
 
         experiment = cli_utils.switch_async_mode(experiment, args.mode)

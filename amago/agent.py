@@ -350,9 +350,13 @@ class BaseAgent(nn.Module, abc.ABC):
                     extra["full_n_traj_layers"] = traj.n_layers
                 elif hasattr(traj, "traj_blocks"):
                     extra["full_n_traj_layers"] = len(traj.traj_blocks)
+                # Propagate Transformer FFN block settings from traj_encoder
+                for attr in ("sigma_reparam", "normformer_norms", "dropout_ff"):
+                    if hasattr(traj, attr):
+                        extra[attr] = getattr(traj, attr)
             self.obs_encoder = FFObsEncoder(
                 obs_space=shortcut_space,
-                d_output=self.traj_encoder.emb_dim,
+                d_output=self.traj_encoder.emb_dim or self.tstep_encoder.emb_dim,  # fallback for Markov (emb_dim=0)
                 scale=scale,
                 **extra,
             )

@@ -553,6 +553,43 @@ class TransformerLayer(nn.Module):
         return self_seq
 
 
+class TransformerFFNBlock(nn.Module):
+    """FFN residual block extracted from TransformerLayer (without attention).
+
+    Exactly mirrors the FFN path of ``TransformerLayer.forward``
+    (lines 548-552): pre-norm -> expand -> activation -> normformer inner norm
+    -> contract -> dropout -> residual.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        d_ff: int,
+        dropout_ff: float = 0.1,
+        activation: str = "leaky_relu",
+        norm: str = "layer",
+        sigma_reparam: bool = True,
+        normformer_norms: bool = True,
+    ):
+        super().__init__()
+        FF = SigmaReparam if sigma_reparam else nn.Linear
+        self.ff1 = FF(d_model, d_ff)
+        self.ff2 = FF(d_ff, d_model)
+        self.norm1 = Normalization(norm, d_model)
+        self.norm2 = (
+            Normalization(norm, d_ff) if normformer_norms else lambda x: x
+        )
+        self.dropout_ff = nn.Dropout(dropout_ff)
+        self.activation = activation_switch(activation)
+        self.d_model = d_model
+
+    def forward(self, seq: torch.Tensor) -> torch.Tensor:
+        q1 = self.norm1(seq)
+        q1 = self.norm2(self.activation(self.ff1(q1)))
+        q1 = self.dropout_ff(self.ff2(q1))
+        return seq + q1
+
+
 class Cache:
     """A cache for key and value tensors."""
 

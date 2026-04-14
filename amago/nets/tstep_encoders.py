@@ -12,7 +12,7 @@ import torch
 from torch import nn
 
 from amago.nets.utils import InputNorm, add_activation_log, symlog, activation_switch
-from amago.nets import ff, cnn
+from amago.nets import ff, cnn, transformer
 
 
 ###############################
@@ -391,6 +391,9 @@ class FFObsEncoder(nn.Module):
         full_n_tstep_layers: int = 2,
         full_d_tstep_hidden: int = 512,
         full_n_traj_layers: int = 3,
+        sigma_reparam: bool = True,
+        normformer_norms: bool = True,
+        dropout_ff: float = 0.05,
     ):
         super().__init__()
         self.scale = scale
@@ -411,11 +414,14 @@ class FFObsEncoder(nn.Module):
                 normalization=norm,
             )
             self.res_blocks = nn.ModuleList([
-                ff.FFBlock(
+                transformer.TransformerFFNBlock(
                     d_model=d_output,
                     d_ff=d_output * 4,
+                    dropout_ff=dropout_ff,
                     activation=activation,
                     norm=norm,
+                    sigma_reparam=sigma_reparam,
+                    normformer_norms=normformer_norms,
                 )
                 for _ in range(full_n_traj_layers)
             ])

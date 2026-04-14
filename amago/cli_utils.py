@@ -330,6 +330,24 @@ def switch_traj_encoder(
                 f"{model_config}.n_layers": layers,
             }
         )
+    elif arch == "mate":
+        config.update(
+            {
+                f"{model_config}.d_model": memory_size,
+                f"{model_config}.d_ff": memory_size * 4,
+                f"{model_config}.n_layers": layers,
+            }
+        )
+    elif arch == "lstm":
+        config.update(
+            {
+                f"{model_config}.n_layers": layers,
+                f"{model_config}.d_output": memory_size,
+                f"{model_config}.d_hidden": memory_size,
+            }
+        )
+    elif arch == "markov":
+        pass
     # For custom registered encoders, pass memory_size and layers as-is
     # (they can be overridden via **kwargs if needed)
     else:

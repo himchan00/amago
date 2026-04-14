@@ -271,7 +271,75 @@ Check out our [project website](https://metamon.tech)!
 
 <br>
 
+## Experimental Features (`simpler` branch)
 
+The `simpler` branch introduces several architectural extensions for improving state representation and memory efficiency. All features are available as CLI flags through `add_common_cli()` and can be combined freely.
+
+### Quick Start
+
+```bash
+python examples/07_metaworld.py \
+    --run_name metaworld_ml45 \
+    --benchmark ml45 \
+    --buffer_dir ./buffer \
+    --parallel_actors 40 \
+    --memory_size 320 \
+    --timesteps_per_epoch 1501 \
+    --agent_type multitask \
+    --max_seq_len 256 \
+    --memory_layers 3 \
+    --dset_max_size 25000 \
+    --epochs 5000 \
+    --val_interval 40 \
+    --traj_encoder mate \
+    --full_transition \
+    --obs_shortcut \
+    --obs_shortcut_scale full
+```
+
+### `--full_transition`
+
+Enriches the TstepEncoder input by including the previous observation alongside the current one. When enabled, `_prev_<key>` entries are added to the observation dict, so the TstepEncoder receives the full transition tuple `(obs, prev_obs, prev_action, prev_reward)` instead of just `(obs, prev_action, prev_reward)`. For CNN-based encoders, the previous image is concatenated along the channel dimension. Backward compatible with data collected without this flag.
+
+### `--obs_shortcut`
+
+Creates a parallel `FFObsEncoder` that encodes the current observation directly (without rl2s or `_prev_` keys) and concatenates its output to the TrajEncoder output. This provides the actor and critic with a direct observation signal alongside the memory-processed representation.
+
+```
+TstepEncoder → TrajEncoder → [traj_emb ; obs_emb] → Actor/Critic
+                                   ↑
+                    FFObsEncoder(obs) ─┘
+```
+
+### `--obs_shortcut_scale {tstep,full}`
+
+Controls the capacity of the obs shortcut encoder:
+
+- **`tstep`** (default) — A single MLP matching the scale of `FFTstepEncoder`. Lightweight.
+- **`full`** — MLP projection + residual FFN blocks matching the TrajEncoder's depth. Layer counts and hidden dims are automatically mirrored from the TstepEncoder and TrajEncoder.
+
+### `--traj_encoder mate`
+
+**MATE (Memory of Accumulated Transition Embeddings)** — a lightweight memory architecture that replaces the Transformer's attention with cumulative-average aggregation while keeping the same FFN residual blocks.
+
+1. Linear projection (`tstep_dim → d_model`) + dropout
+2. `n_layers` of `TransformerFFNBlock` (pre-norm residual FFN with sigma-reparam and NormFormer norms — identical to the Transformer's FFN blocks)
+3. Cumulative weighted average over the processed sequence, initialized from a learned embedding
+4. Output LayerNorm
+
+Key properties:
+- **O(1) per-step inference** — hidden state is a running `(cumsum, count)` pair; no KV cache needed.
+- **Controlled Transformer ablation** — same FFN blocks; only the aggregation mechanism differs (cumulative average vs. attention).
+- **Gating** — `use_gate=True` adds a learned per-timestep gate that modulates each step's contribution to the running average. Enable via CLI:
+  ```bash
+  --gin_bindings="amago.nets.traj_encoders.MATETrajEncoder.use_gate=True"
+  ```
+- `--memory_size` and `--memory_layers` map to `d_model` and `n_layers` (same convention as the Transformer).
+
+
+---
+
+<br>
 
 ## Citation
 ```

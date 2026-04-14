@@ -384,6 +384,9 @@ class TformerTrajEncoder(TrajEncoder):
         self.n_layers = n_layers
         self.attention_type = attention_type
         self.d_model = d_model
+        self.sigma_reparam = sigma_reparam
+        self.normformer_norms = normformer_norms
+        self.dropout_ff = dropout_ff
 
         def make_layer():
             return transformer.TransformerLayer(
@@ -620,3 +623,246 @@ class MambaTrajEncoder(TrajEncoder):
     @property
     def emb_dim(self):
         return self._emb_dim
+
+
+@gin.configurable
+@register_traj_encoder("mate")
+class MATETrajEncoder(TrajEncoder):
+    """Memory of Accumulated Transition Embeddings (MATE) Trajectory Encoder.
+
+    Architecture is equivalent to TformerTrajEncoder with attention layers removed
+    and a cumulative-average aggregation added on top. Each timestep embedding
+    is processed through FFN residual blocks (identical to the Transformer's FFN
+    blocks), then aggregated via a running weighted average over the sequence.
+
+    Ported from Memory-RL (policies/seq_models/mate_vanilla.py).
+
+    Args:
+        tstep_dim: Dimension of the input timestep representation.
+        max_seq_len: Maximum sequence length.
+
+    Keyword Args:
+        d_model: Dimension of the main residual stream and output. Defaults to 256.
+        d_ff: Dimension of feed-forward network in residual blocks. Defaults to 1024.
+        n_layers: Number of FFN residual blocks. Defaults to 3.
+        dropout_ff: Dropout rate for FFN layers. Defaults to 0.05.
+        dropout_emb: Dropout rate for input embedding. Defaults to 0.05.
+        activation: Activation function. Defaults to "leaky_relu".
+        norm: Normalization method. Defaults to "layer".
+        sigma_reparam: Whether to use sigma-reparam layers. Defaults to True.
+        normformer_norms: Whether to use extra NormFormer normalization. Defaults to True.
+        use_gate: Whether to use a learned per-step gating mechanism. Defaults to False.
+    """
+
+    def __init__(
+        self,
+        tstep_dim: int,
+        max_seq_len: int,
+        d_model: int = 256,
+        d_ff: int = 1024,
+        n_layers: int = 3,
+        dropout_ff: float = 0.05,
+        dropout_emb: float = 0.05,
+        activation: str = "leaky_relu",
+        norm: str = "layer",
+        sigma_reparam: bool = True,
+        normformer_norms: bool = True,
+        use_gate: bool = False,
+    ):
+        super().__init__(tstep_dim, max_seq_len)
+        self.sigma_reparam = sigma_reparam
+        self.normformer_norms = normformer_norms
+        self.dropout_ff = dropout_ff
+        self.inp = nn.Linear(tstep_dim, d_model)
+        self.dropout_emb = nn.Dropout(dropout_emb)
+        self.layers = nn.ModuleList(
+            [
+                transformer.TransformerFFNBlock(
+                    d_model=d_model,
+                    d_ff=d_ff,
+                    dropout_ff=dropout_ff,
+                    activation=activation,
+                    norm=norm,
+                    sigma_reparam=sigma_reparam,
+                    normformer_norms=normformer_norms,
+                )
+                for _ in range(n_layers)
+            ]
+        )
+        self.init_emb = nn.Parameter(torch.randn(d_model))
+        self.use_gate = use_gate
+        if use_gate:
+            self.gate = ff.MLP(
+                d_inp=d_model,
+                d_hidden=d_model,
+                n_layers=n_layers,
+                d_output=1,
+            )
+        self.out_norm = ff.Normalization(norm, d_model)
+        self._emb_dim = d_model
+
+    @property
+    def emb_dim(self) -> int:
+        return self._emb_dim
+
+    def init_hidden_state(
+        self, batch_size: int, device: torch.device
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        cumsum = torch.zeros(batch_size, self._emb_dim, device=device)
+        count = torch.zeros(batch_size, 1, device=device)
+        return (cumsum, count)
+
+    def reset_hidden_state(
+        self, hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]], dones: np.ndarray
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        if hidden_state is None:
+            return None
+        cumsum, count = hidden_state
+        cumsum[dones] = 0.0
+        count[dones] = 0.0
+        return (cumsum, count)
+
+    def _ffn_forward(self, seq: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            seq = layer(seq)
+        return seq
+
+    def forward(
+        self,
+        seq: torch.Tensor,
+        time_idxs: Optional[torch.Tensor] = None,
+        hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        log_dict: Optional[dict] = None,
+    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+        B, L, _ = seq.shape
+        seq = self.dropout_emb(self.inp(seq))
+        z = self._ffn_forward(seq)
+
+        if self.use_gate:
+            w = torch.sigmoid(self.gate(seq))  # (B, L, 1)
+            if log_dict is not None:
+                with torch.no_grad():
+                    log_dict["mate_gate_mean"] = w.mean().item()
+                    log_dict["mate_gate_std"] = w.std().item()
+        else:
+            w = seq.new_ones(B, L, 1)
+
+        if hidden_state is not None:
+            assert not self.training
+            prev_cumsum, prev_count = hidden_state
+            cumsum = prev_cumsum + (z.squeeze(1) * w.squeeze(1))
+            count = prev_count + w.squeeze(1)
+            output = (cumsum + self.init_emb) / count.clamp(min=1e-6)
+            output = self.out_norm(output.unsqueeze(1))
+            return output, (cumsum, count)
+        else:
+            cumsum = (z * w).cumsum(dim=1)
+            count = w.cumsum(dim=1)
+            output = (cumsum + self.init_emb) / count.clamp(min=1e-6)
+            output = self.out_norm(output)
+            return output, None
+
+
+@gin.configurable
+@register_traj_encoder("lstm")
+class LSTMTrajEncoder(TrajEncoder):
+    """LSTM Trajectory Encoder.
+
+    Follows the same pattern as GRUTrajEncoder but uses nn.LSTM, handling
+    the dual (hidden_state, cell_state) tuple.
+
+    Ported from Memory-RL (policies/seq_models/rnn_vanilla.py).
+
+    Args:
+        tstep_dim: Dimension of the input timestep representation.
+        max_seq_len: Maximum sequence length.
+
+    Keyword Args:
+        d_hidden: Dimension of the LSTM hidden state. Defaults to 256.
+        n_layers: Number of LSTM layers. Defaults to 2.
+        d_output: Dimension of the output linear layer. Defaults to 256.
+        dropout: Dropout rate between LSTM layers (only used when n_layers > 1).
+            Defaults to 0.0.
+        norm: Output normalization method. Defaults to "layer".
+    """
+
+    def __init__(
+        self,
+        tstep_dim: int,
+        max_seq_len: int,
+        d_hidden: int = 256,
+        n_layers: int = 2,
+        d_output: int = 256,
+        dropout: float = 0.0,
+        norm: str = "layer",
+    ):
+        super().__init__(tstep_dim, max_seq_len)
+        self.lstm = nn.LSTM(
+            input_size=tstep_dim,
+            hidden_size=d_hidden,
+            num_layers=n_layers,
+            bias=True,
+            batch_first=True,
+            bidirectional=False,
+            dropout=dropout,
+        )
+        self.out = nn.Linear(d_hidden, d_output)
+        self.out_norm = ff.Normalization(norm, d_output)
+        self._emb_dim = d_output
+
+    def reset_hidden_state(self, hidden_state, dones):
+        assert hidden_state is not None
+        h, c = hidden_state
+        h[:, dones] = 0.0
+        c[:, dones] = 0.0
+        return (h, c)
+
+    def forward(
+        self,
+        seq: torch.Tensor,
+        time_idxs: Optional[torch.Tensor] = None,
+        hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        log_dict: Optional[dict] = None,
+    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+        output_seq, new_hidden_state = self.lstm(seq, hidden_state)
+        out = self.out_norm(self.out(output_seq))
+        return out, new_hidden_state
+
+    @property
+    def emb_dim(self):
+        return self._emb_dim
+
+
+@gin.configurable
+@register_traj_encoder("markov")
+class MarkovTrajEncoder(TrajEncoder):
+    """Markov (memory-free) Trajectory Encoder.
+
+    Outputs zero-dimensional tensors, contributing no temporal information.
+    Designed to be used with ``obs_shortcut=True`` so that the observation
+    embedding provides the full state representation. Useful as a no-memory
+    baseline.
+
+    Ported from Memory-RL (policies/seq_models/markov_vanilla.py).
+
+    Args:
+        tstep_dim: Dimension of the input timestep representation.
+        max_seq_len: Maximum sequence length.
+    """
+
+    def __init__(self, tstep_dim: int, max_seq_len: int):
+        super().__init__(tstep_dim, max_seq_len)
+
+    @property
+    def emb_dim(self) -> int:
+        return 0
+
+    def forward(
+        self,
+        seq: torch.Tensor,
+        time_idxs: Optional[torch.Tensor] = None,
+        hidden_state: Optional[Any] = None,
+        log_dict: Optional[dict] = None,
+    ) -> Tuple[torch.Tensor, Optional[Any]]:
+        B, L, _ = seq.shape
+        return seq.new_zeros(B, L, 0), hidden_state

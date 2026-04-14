@@ -368,6 +368,13 @@ class FFObsEncoder(nn.Module):
     """MLP encoder for raw observations (no rl2s). Used by obs_shortcut.
 
     Filters out `_prev_` keys and only encodes current observations.
+
+    Args:
+        scale: "tstep" = single MLP matching FFTstepEncoder scale.
+            "full" = MLP projection + residual FFN blocks matching TrajEncoder scale.
+        full_n_tstep_layers: Stage 1 layer count for "full" scale. Auto-set from FFTstepEncoder.
+        full_d_tstep_hidden: Stage 1 hidden dim for "full" scale. Auto-set from FFTstepEncoder.
+        full_n_traj_layers: Stage 2 residual block count for "full" scale. Auto-set from TrajEncoder.
     """
 
     def __init__(
@@ -380,8 +387,13 @@ class FFObsEncoder(nn.Module):
         out_norm: str = "layer",
         activation: str = "leaky_relu",
         normalize_inputs: bool = True,
+        scale: str = "tstep",
+        full_n_tstep_layers: int = 2,
+        full_d_tstep_hidden: int = 512,
+        full_n_traj_layers: int = 3,
     ):
         super().__init__()
+        self.scale = scale
         self.obs_keys = sorted(
             [k for k in obs_space.keys() if not k.startswith("_prev_")]
         )
@@ -389,14 +401,33 @@ class FFObsEncoder(nn.Module):
             math.prod(obs_space[key].shape) for key in self.obs_keys
         )
         self.in_norm = InputNorm(flat_obs_shape, skip=not normalize_inputs)
-        self.base = ff.MLP(
-            d_inp=flat_obs_shape,
-            d_hidden=d_hidden,
-            n_layers=n_layers,
-            d_output=d_output,
-            activation=activation,
-            normalization=norm,
-        )
+        if scale == "full":
+            self.proj = ff.MLP(
+                d_inp=flat_obs_shape,
+                d_hidden=full_d_tstep_hidden,
+                n_layers=full_n_tstep_layers,
+                d_output=d_output,
+                activation=activation,
+                normalization=norm,
+            )
+            self.res_blocks = nn.ModuleList([
+                ff.FFBlock(
+                    d_model=d_output,
+                    d_ff=d_output * 4,
+                    activation=activation,
+                    norm=norm,
+                )
+                for _ in range(full_n_traj_layers)
+            ])
+        else:
+            self.base = ff.MLP(
+                d_inp=flat_obs_shape,
+                d_hidden=d_hidden,
+                n_layers=n_layers,
+                d_output=d_output,
+                activation=activation,
+                normalization=norm,
+            )
         self.out_norm = ff.Normalization(out_norm, d_output)
         self._emb_dim = d_output
 
@@ -411,7 +442,12 @@ class FFObsEncoder(nn.Module):
         if self.training:
             self.in_norm.update_stats(flat_obs)
         flat_obs = self.in_norm(flat_obs)
-        out = self.base(flat_obs)
+        if self.scale == "full":
+            out = self.proj(flat_obs)
+            for block in self.res_blocks:
+                out = block(out)
+        else:
+            out = self.base(flat_obs)
         return self.out_norm(out)
 
     @property

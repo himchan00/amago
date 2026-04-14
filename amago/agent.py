@@ -18,6 +18,7 @@ import gymnasium as gym
 
 from amago.loading import Batch, MAGIC_PAD_VAL
 from amago.nets.tstep_encoders import TstepEncoder, FFObsEncoder
+from amago.nets import ff
 from amago.nets.traj_encoders import TrajEncoder
 from amago.nets import actor_critic
 from amago.nets.policy_dists import DiscreteLikeContinuous
@@ -337,9 +338,23 @@ class BaseAgent(nn.Module, abc.ABC):
             shortcut_space = gym.spaces.Dict(
                 {k: v for k, v in self.obs_space.items() if not k.startswith("_prev_")}
             )
+            scale = getattr(self, "obs_shortcut_scale", "tstep")
+            extra = {}
+            if scale == "full":
+                tstep = self.tstep_encoder
+                if hasattr(tstep, "base") and isinstance(tstep.base, ff.MLP):
+                    extra["full_n_tstep_layers"] = 1 + len(tstep.base.layers)
+                    extra["full_d_tstep_hidden"] = tstep.base.in_layer.out_features
+                traj = self.traj_encoder
+                if hasattr(traj, "n_layers"):
+                    extra["full_n_traj_layers"] = traj.n_layers
+                elif hasattr(traj, "traj_blocks"):
+                    extra["full_n_traj_layers"] = len(traj.traj_blocks)
             self.obs_encoder = FFObsEncoder(
                 obs_space=shortcut_space,
                 d_output=self.traj_encoder.emb_dim,
+                scale=scale,
+                **extra,
             )
 
     @property
@@ -647,8 +662,10 @@ class Agent(BaseAgent):
         critic_type: Type[actor_critic.BaseCriticHead] = actor_critic.NCritics,
         pass_obs_keys_to_actor: Optional[Iterable[str]] = None,
         obs_shortcut: bool = False,
+        obs_shortcut_scale: str = "tstep",
     ):
         self.obs_shortcut = obs_shortcut
+        self.obs_shortcut_scale = obs_shortcut_scale
         super().__init__(
             obs_space=obs_space,
             rl2_space=rl2_space,
@@ -1269,6 +1286,7 @@ class MultiTaskAgent(Agent):
         critic_type: Type[actor_critic.BaseCriticHead] = actor_critic.NCriticsTwoHot,
         pass_obs_keys_to_actor: Optional[Iterable[str]] = None,
         obs_shortcut: bool = False,
+        obs_shortcut_scale: str = "tstep",
     ):
         super().__init__(
             obs_space=obs_space,
@@ -1297,6 +1315,7 @@ class MultiTaskAgent(Agent):
             critic_type=critic_type,
             pass_obs_keys_to_actor=pass_obs_keys_to_actor,
             obs_shortcut=obs_shortcut,
+            obs_shortcut_scale=obs_shortcut_scale,
         )
 
     def _sample_k_actions(self, dist, k: int):

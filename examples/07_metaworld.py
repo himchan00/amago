@@ -48,6 +48,7 @@ if __name__ == "__main__":
     agent_type = cli_utils.switch_agent(
         config, args.agent_type, reward_multiplier=1.0, num_critics=4,
         obs_shortcut=args.obs_shortcut,
+                    obs_shortcut_scale=args.obs_shortcut_scale, # "tstep" or "full"
     )
     exploration_type = cli_utils.switch_exploration(
         config, "bilevel", steps_anneal=2_000_000, rollout_horizon=args.k * 500

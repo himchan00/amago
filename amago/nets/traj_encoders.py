@@ -376,7 +376,7 @@ class TformerTrajEncoder(TrajEncoder):
         sigma_reparam: bool = True,
         normformer_norms: bool = True,
         head_scaling: bool = True,
-        attention_type: type[transformer.SelfAttention] = transformer.FlashAttention,
+        attention_type: type[transformer.SelfAttention] = transformer.VanillaAttention,
     ):
         super().__init__(tstep_dim, max_seq_len)
         self.head_dim = d_model // n_heads

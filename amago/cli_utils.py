@@ -196,6 +196,13 @@ def add_common_cli(parser: ArgumentParser) -> ArgumentParser:
         action="store_true",
         help="Concatenate a direct observation embedding to the TrajEncoder output for actor/critic.",
     )
+    parser.add_argument(
+        "--obs_shortcut_scale",
+        type=str,
+        default="tstep",
+        choices=["tstep", "full"],
+        help="Scale of obs_shortcut encoder: 'tstep' matches FFTstepEncoder, 'full' adds residual FFN blocks matching TrajEncoder.",
+    )
     return parser
 
 

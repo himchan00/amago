@@ -242,6 +242,9 @@ class Experiment:
             \t\t Offline Loss Weight: {self.policy.offline_coeff}
             \t\t Online Loss Weight: {self.policy.online_coeff}
             \t\t Mixed Precision: {self.mixed_precision.upper()}
+            \t\t Full Transition: {self.full_transition}
+            \t\t Obs Shortcut: {getattr(self.policy, 'obs_shortcut', False)}
+            \t\t Obs Shortcut Scale: {getattr(self.policy, 'obs_shortcut_scale', 'N/A')}
             \t\t Checkpoint Path: {self.ckpt_dir}
             \t Environment:
             \t\t {env_summary}

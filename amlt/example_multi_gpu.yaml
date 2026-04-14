@@ -1,0 +1,150 @@
+description: >
+  AMAGO ML45 (MetaWorld) - multi-GPU (4x A100)
+
+env_defaults:
+  NODES: 1
+  GPUS: 4
+  MEM: 80
+  BASE_DIR: /mnt/v-hihwang/projects/amago
+
+target:
+  service: sing
+  workspace_name: wsgcrrbt
+  name: msrresrchvc
+
+storage:
+  my_storage:
+    storage_account_name: azsussc
+    container_name: v-hihwang
+    mount_dir: /mnt/v-hihwang
+
+environment:
+  image: amlt-sing/acpt-torch2.7.1-py3.10-cuda12.6-ubuntu22.04
+  setup:
+    - conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main || true
+    - conda create -y -n amago python=3.10
+    # Pre-requisites (cython<3 required before mujoco_py build)
+    - conda run --name amago pip install 'cython<3' setuptools wheel versioneer
+    # PyTorch (CUDA 12.6) — cluster driver supports CUDA 12.8, NOT 13.0 (PyPI default)
+    - conda run --name amago pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu126
+    # Restore setuptools (cu126 index downgrades to 70.x, but pyproject.toml PEP 639 needs >=77)
+    - conda run --name amago pip install 'setuptools>=77,<82'
+    # MuJoCo 210 binary
+    - mkdir -p ~/.mujoco && cd ~/.mujoco && wget -q https://mujoco.org/download/mujoco210-linux-x86_64.tar.gz && tar -xzf mujoco210-linux-x86_64.tar.gz && rm mujoco210-linux-x86_64.tar.gz
+    # AMAGO core (--no-build-isolation required)
+    - cd /scratch/amlt_code && conda run --name amago pip install -e . --no-build-isolation
+    # mujoco-py + patchelf (patchelf needed for mujoco_py JIT post-build step)
+    - conda run --name amago pip install mujoco-py patchelf --no-build-isolation
+    # MetaWorld (pinned commit)
+    - conda run --name amago pip install 'metaworld @ git+https://github.com/Farama-Foundation/Metaworld.git@04be337a12305e393c0caf0cbf5ec7755c7c8feb' --no-build-isolation
+    # scipy (MetaWorld dependency)
+    - conda run --name amago pip install scipy
+    # GL headers + stub libs for mujoco_py CPU builder (headless cluster has no mesa-dev)
+    - conda run --name amago python /scratch/amlt_code/setup_mujoco_gl.py
+    - ls /home/aiscuser/.conda/envs/amago/include/GL/osmesa.h /home/aiscuser/.conda/envs/amago/lib/libOSMesa.so /home/aiscuser/.conda/envs/amago/lib/libGL.so
+
+code:
+  local_dir: $CONFIG_DIR/..
+
+jobs:
+  - name: ml45_vanilla_4gpu
+    sku: ${NODES}x${MEM}G${GPUS}-A100
+    process_count_per_node: 1
+    sla_tier: Premium
+    execution_mode: basic
+    submit_args:
+      env:
+        AMLT_DOCKERFILE_TEMPLATE: default
+        SHARED_MEMORY_PERCENT: 0.5
+        WANDB_API_KEY: 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
+        PYTHONUNBUFFERED: "1"
+    command:
+      - "export MUJOCO_PY_MUJOCO_PATH=/home/aiscuser/.mujoco/mujoco210"
+      - "export LD_LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:/home/aiscuser/.mujoco/mujoco210/bin:$$LD_LIBRARY_PATH"
+      - "export C_INCLUDE_PATH=/home/aiscuser/.conda/envs/amago/include:$$C_INCLUDE_PATH"
+      - "export LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:$$LIBRARY_PATH"
+      - conda run --no-capture-output --name amago
+          accelerate launch --num_processes=4 --mixed_precision=no
+          examples/07_metaworld.py
+          --run_name metaworld_ml45_vanilla_4gpu
+          --benchmark ml45
+          --buffer_dir ${BASE_DIR}/buffer
+          --parallel_actors 40
+          --memory_size 320
+          --timesteps_per_epoch 1501
+          --agent_type multitask
+          --max_seq_len 256
+          --memory_layers 3
+          --dset_max_size 25000
+          --epochs 5000
+          --val_interval 40
+
+  - name: ml45_full_trans_obs_sc_scale_tstep_4gpu
+    sku: ${NODES}x${MEM}G${GPUS}-A100
+    process_count_per_node: 1
+    sla_tier: Premium
+    execution_mode: basic
+    submit_args:
+      env:
+        AMLT_DOCKERFILE_TEMPLATE: default
+        SHARED_MEMORY_PERCENT: 0.5
+        WANDB_API_KEY: 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
+        PYTHONUNBUFFERED: "1"
+    command:
+      - "export MUJOCO_PY_MUJOCO_PATH=/home/aiscuser/.mujoco/mujoco210"
+      - "export LD_LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:/home/aiscuser/.mujoco/mujoco210/bin:$$LD_LIBRARY_PATH"
+      - "export C_INCLUDE_PATH=/home/aiscuser/.conda/envs/amago/include:$$C_INCLUDE_PATH"
+      - "export LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:$$LIBRARY_PATH"
+      - conda run --no-capture-output --name amago
+          accelerate launch --num_processes=4 --mixed_precision=no
+          examples/07_metaworld.py
+          --run_name metaworld_ml45_full_trans_obs_sc_tstep_4gpu
+          --benchmark ml45
+          --buffer_dir ${BASE_DIR}/buffer
+          --parallel_actors 40
+          --memory_size 320
+          --timesteps_per_epoch 1501
+          --agent_type multitask
+          --max_seq_len 256
+          --memory_layers 3
+          --dset_max_size 25000
+          --epochs 5000
+          --val_interval 40
+          --full_transition
+          --obs_shortcut
+          --obs_shortcut_scale tstep
+
+  - name: ml45_full_trans_obs_sc_scale_full_4gpu
+    sku: ${NODES}x${MEM}G${GPUS}-A100
+    process_count_per_node: 1
+    sla_tier: Premium
+    execution_mode: basic
+    submit_args:
+      env:
+        AMLT_DOCKERFILE_TEMPLATE: default
+        SHARED_MEMORY_PERCENT: 0.5
+        WANDB_API_KEY: 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
+        PYTHONUNBUFFERED: "1"
+    command:
+      - "export MUJOCO_PY_MUJOCO_PATH=/home/aiscuser/.mujoco/mujoco210"
+      - "export LD_LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:/home/aiscuser/.mujoco/mujoco210/bin:$$LD_LIBRARY_PATH"
+      - "export C_INCLUDE_PATH=/home/aiscuser/.conda/envs/amago/include:$$C_INCLUDE_PATH"
+      - "export LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:$$LIBRARY_PATH"
+      - conda run --no-capture-output --name amago
+          accelerate launch --num_processes=4 --mixed_precision=no
+          examples/07_metaworld.py
+          --run_name metaworld_ml45_full_trans_obs_sc_scale_full_4gpu
+          --benchmark ml45
+          --buffer_dir ${BASE_DIR}/buffer
+          --parallel_actors 40
+          --memory_size 320
+          --timesteps_per_epoch 1501
+          --agent_type multitask
+          --max_seq_len 256
+          --memory_layers 3
+          --dset_max_size 25000
+          --epochs 5000
+          --val_interval 40
+          --full_transition
+          --obs_shortcut
+          --obs_shortcut_scale full

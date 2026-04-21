@@ -286,7 +286,7 @@ class Trajectory:
         batched, length, dim = rl2s.shape
         assert batched == 1, "attempting to freeze a batched trajectory"
         return FrozenTraj(
-            obs={k:v.squeeze(0) for k,v in obs.items()},
+            obs={k:v.squeeze(0) for k,v in obs.items() if not k.startswith("_prev_")},
             rl2s=rl2s.squeeze(0),
             time_idxs=time.squeeze(0),
             rews=rews.squeeze(0),

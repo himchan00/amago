@@ -1128,8 +1128,6 @@ class Agent(BaseAgent):
             stats[f"Q(s, a) (global mean, rescaled) gamma={gamma:.3f}"] = masked_avg(
                 q_s_a_g, i
             )
-            print("here")
-            stats["Q Sequence"] = q_s_a_g
             stats[f"Q(s,a) (global mean, raw scale) gamma={gamma:.3f}"] = masked_avg(
                 raw_q_s_a_g, i
             )

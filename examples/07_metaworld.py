@@ -38,6 +38,10 @@ if __name__ == "__main__":
     if args.use_gate:
         assert args.traj_encoder == "mate", "Gating is only supported for MATE trajectory encoder."
 
+    traj_encoder_extra_kwargs = {}
+    if args.traj_encoder == "mate":
+        traj_encoder_extra_kwargs["use_gate"] = args.use_gate
+
     config = {
         "amago.nets.tstep_encoders.FFTstepEncoder.hide_rl2s": args.hide_rl2s,
         # delete the next three lines to use the paper settings, which were
@@ -51,7 +55,7 @@ if __name__ == "__main__":
         arch=args.traj_encoder,
         memory_size=args.memory_size,
         layers=args.memory_layers,
-        **({"use_gate": args.use_gate} if args.traj_encoder == "mate" else {}),
+        **traj_encoder_extra_kwargs,
     )
     agent_type = cli_utils.switch_agent(
         config, args.agent_type, reward_multiplier=1.0, num_critics=4,
@@ -70,7 +74,7 @@ if __name__ == "__main__":
         f"{args.run_name}_metaworld_{args.benchmark}_K_{args.k}_L_{args.max_seq_len}"
     )
     for trial in range(args.trials):
-        run_name = group_name + f"_trial_{trial}"
+        run_name = f"{args.run_name}_trial_{trial}" if args.trials > 1 else args.run_name
         experiment = cli_utils.create_experiment_from_cli(
             args,
             make_train_env=make_train_env,

@@ -6,6 +6,7 @@ import os
 import time
 import warnings
 import contextlib
+import hashlib
 from dataclasses import dataclass
 from collections import defaultdict
 from typing import Optional, Iterable
@@ -483,6 +484,7 @@ class Experiment:
             gin_as_wandb = utils.gin_as_wandb_config()
             log_dir = os.path.join(self.ckpt_base_dir, self.run_name, "wandb_logs")
             os.makedirs(log_dir, exist_ok=True)
+            wandb_run_id = hashlib.md5(self.run_name.encode()).hexdigest()[:16]
             self.accelerator.init_trackers(
                 project_name=self.wandb_project,
                 config=gin_as_wandb,
@@ -492,6 +494,8 @@ class Experiment:
                         dir=log_dir,
                         name=self.run_name,
                         group=self.wandb_group_name,
+                        id=wandb_run_id,
+                        resume="allow",
                     )
                 },
             )
@@ -787,6 +791,9 @@ class Experiment:
         # add epoch
         metrics["Epoch"] = self.epoch
         metrics["gradient_steps"] = self.grad_update_counter
+        learn_start = getattr(self, "_learn_start_time", None)
+        if learn_start is not None:
+            metrics["elapsed_hours"] = (time.time() - learn_start) / 3600
         return metrics
 
     def log(
@@ -926,6 +933,7 @@ class Experiment:
                 return enumerate(loader)
 
         start_epoch = self.epoch
+        self._learn_start_time = time.time()
         for epoch in range(start_epoch, self.epochs):
             if self.always_load_latest:
                 self.read_latest_policy()

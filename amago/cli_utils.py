@@ -6,7 +6,9 @@ and to break up configuration into several smaller steps.
 """
 
 import os
+import warnings
 from argparse import ArgumentParser
+from datetime import datetime
 from typing import Optional
 
 import gin
@@ -84,13 +86,19 @@ def add_common_cli(parser: ArgumentParser) -> ArgumentParser:
         "--ckpt",
         type=int,
         default=None,
-        help="Start training from an epoch checkpoint saved in a buffer with the same `--run_name`",
+        help="Start training from an epoch checkpoint. Use with --timestamp to resume a previous run.",
+    )
+    parser.add_argument(
+        "--timestamp",
+        type=str,
+        default=None,
+        help="Timestamp suffix for run directory. If omitted, auto-generated. Pass the same value to resume a previous run with --ckpt.",
     )
     parser.add_argument(
         "--run_name",
         type=str,
         required=True,
-        help="Give the run a name. Used for logging and the disk replay buffer. Experiments with the same run_name share the same replay buffer, but log separately.",
+        help="Give the run a name. Used for logging and the disk replay buffer. A timestamp is appended automatically for uniqueness.",
     )
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument(
@@ -444,6 +452,13 @@ def create_experiment_from_cli(
     cli = command_line_args
 
     traj_save_len = traj_save_len or 1e10
+
+    # Append timestamp to run_name for unique buffer directories
+    ts = cli.timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+    if cli.ckpt is not None and cli.timestamp is None:
+        warnings.warn("[AMAGO] --ckpt without --timestamp will load from a mismatched directory. Use --timestamp to specify the original run's identifier.")
+    run_name = f"{run_name}_{ts}"
+    print(f"[AMAGO] Run name with timestamp: {run_name}")
 
     if dataset is None:
         # create a new-style dataset in the place

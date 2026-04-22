@@ -422,17 +422,21 @@ class Experiment:
         )
         if self.accelerator.is_main_process:
             # create backup of raw weights unrelated to the more complex process of resuming an accelerate state
-            torch.save(
-                self.policy.state_dict(),
-                os.path.join(
-                    self.ckpt_dir, "policy_weights", f"policy_epoch_{self.epoch}.pt"
-                ),
+            backup_path = os.path.join(
+                self.ckpt_dir, "policy_weights", f"policy_epoch_{self.epoch}.pt"
+            )
+            utils.atomic_write_via_tmp(
+                backup_path,
+                lambda tmp: torch.save(self.policy.state_dict(), tmp),
             )
 
     def write_latest_policy(self) -> None:
         """Write absolute latest policy to a hardcoded location used by `read_latest_policy`"""
         ckpt_name = os.path.join(self.ckpt_dir, "latest", "policy.pt")
-        torch.save(self.policy.state_dict(), ckpt_name)
+        utils.atomic_write_via_tmp(
+            ckpt_name,
+            lambda tmp: torch.save(self.policy.state_dict(), tmp),
+        )
 
     def read_latest_policy(self) -> None:
         """Read the latest policy -- used to communicate weight updates between
@@ -980,5 +984,5 @@ class Experiment:
             self.epoch = epoch
             if self.ckpt_interval and epoch % self.ckpt_interval == 0:
                 self.save_checkpoint()
-            if self.always_save_latest:
+            if self.always_save_latest and self.accelerator.is_main_process:
                 self.write_latest_policy()

@@ -19,6 +19,35 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.optim import AdamW
 
 
+def atomic_write_via_tmp(final_path: str, writer_fn) -> None:
+    """Atomically materialize `final_path` by writing to `final_path + ".tmp"` first.
+
+    `writer_fn(tmp_path)` must produce the full file at `tmp_path`. The helper then
+    fsyncs the file (and parent dir, best-effort), and uses `os.replace` so readers
+    never observe a partial file. Prevents 0-byte / truncated checkpoints when a
+    job is preempted mid-write (e.g. AMLT STD preemption corrupting `.npz` traj
+    files or `.pt` policy weights).
+    """
+    tmp = final_path + ".tmp"
+    writer_fn(tmp)
+    fd = os.open(tmp, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    parent = os.path.dirname(final_path) or "."
+    try:
+        dfd = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:
+        # some filesystems (e.g. Azure Blob FUSE) may not support directory fsync
+        pass
+    os.replace(tmp, final_path)
+
+
 class AmagoWarning(Warning):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

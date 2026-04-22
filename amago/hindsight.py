@@ -256,14 +256,22 @@ class Trajectory:
                 - 'npz-compressed': Compressed numpy .npz file format
         """
         if save_as == "trajectory":
-            with open(f"{path}.traj", "wb") as f:
-                pickle.dump(self, f)
+            def _write(tmp):
+                with open(tmp, "wb") as f:
+                    pickle.dump(self, f)
+            utils.atomic_write_via_tmp(f"{path}.traj", _write)
         elif save_as == "npz":
             frozen = self.freeze()
-            np.savez(path, **frozen.to_dict())
+            def _write(tmp):
+                with open(tmp, "wb") as f:
+                    np.savez(f, **frozen.to_dict())
+            utils.atomic_write_via_tmp(f"{path}.npz", _write)
         elif save_as == "npz-compressed":
             frozen = self.freeze()
-            np.savez_compressed(path, **frozen.to_dict())
+            def _write(tmp):
+                with open(tmp, "wb") as f:
+                    np.savez_compressed(f, **frozen.to_dict())
+            utils.atomic_write_via_tmp(f"{path}.npz", _write)
         else:
             raise ValueError(
                 f"Unrecognized Trajectory `save_to_disk` format `save_as = {save_as}` (options are: 'trajectory' (slowest read/write, can relabel), 'npz' (fastest, cannot relabel), 'npz-compressed' (save space, cannot relabel)"

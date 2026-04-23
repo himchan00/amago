@@ -186,6 +186,11 @@ class Experiment:
     mixed_precision: str = "no"
 
     def __post_init__(self):
+        # Avoid fd-table exhaustion under persistent_workers + prefetch:
+        # each worker→main tensor would otherwise consume one fd, and with
+        # persistent_workers=True the natural per-epoch reclamation goes away.
+        # Linux-only; no-op on macOS/Windows.
+        torch.multiprocessing.set_sharing_strategy("file_system")
         # Performance: enable TF32 and cuDNN autotuning globally
         torch.set_float32_matmul_precision("high")
         torch.backends.cuda.matmul.allow_tf32 = True

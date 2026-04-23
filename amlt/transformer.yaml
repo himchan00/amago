@@ -59,6 +59,7 @@ jobs:
         WANDB_API_KEY: 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
         PYTHONUNBUFFERED: "1"
     command:
+      - "ulimit -n 65536"
       - "export MUJOCO_PY_MUJOCO_PATH=/home/aiscuser/.mujoco/mujoco210"
       - "export LD_LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:/home/aiscuser/.mujoco/mujoco210/bin:$$LD_LIBRARY_PATH"
       - "export C_INCLUDE_PATH=/home/aiscuser/.conda/envs/amago/include:$$C_INCLUDE_PATH"
@@ -90,6 +91,7 @@ jobs:
         WANDB_API_KEY: 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
         PYTHONUNBUFFERED: "1"
     command:
+      - "ulimit -n 65536"
       - "export MUJOCO_PY_MUJOCO_PATH=/home/aiscuser/.mujoco/mujoco210"
       - "export LD_LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:/home/aiscuser/.mujoco/mujoco210/bin:$$LD_LIBRARY_PATH"
       - "export C_INCLUDE_PATH=/home/aiscuser/.conda/envs/amago/include:$$C_INCLUDE_PATH"
@@ -124,6 +126,7 @@ jobs:
         WANDB_API_KEY: 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
         PYTHONUNBUFFERED: "1"
     command:
+      - "ulimit -n 65536"
       - "export MUJOCO_PY_MUJOCO_PATH=/home/aiscuser/.mujoco/mujoco210"
       - "export LD_LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:/home/aiscuser/.mujoco/mujoco210/bin:$$LD_LIBRARY_PATH"
       - "export C_INCLUDE_PATH=/home/aiscuser/.conda/envs/amago/include:$$C_INCLUDE_PATH"

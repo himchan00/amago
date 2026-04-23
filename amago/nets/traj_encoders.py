@@ -133,6 +133,10 @@ class TrajEncoder(nn.Module, ABC):
         """
         return hidden_state
 
+    def transform_obs_for_shortcut(self, obs_emb: torch.Tensor) -> torch.Tensor:
+        # Default: identity. Override if needed to transform obs_emb before concatenating to seq model output.
+        return obs_emb
+
     @abstractmethod
     def forward(
         self,
@@ -703,7 +707,6 @@ class MATETrajEncoder(TrajEncoder):
                 n_layers=n_layers,
                 d_output=1,
             )
-        self.out_norm = ff.Normalization(norm, d_model)
         self._emb_dim = d_model
 
     @property
@@ -759,13 +762,11 @@ class MATETrajEncoder(TrajEncoder):
             cumsum = prev_cumsum + (z.squeeze(1) * w.squeeze(1))
             count = prev_count + w.squeeze(1)
             output = (cumsum + self.init_emb) / count.clamp(min=1e-6)
-            output = self.out_norm(output.unsqueeze(1))
-            return output, (cumsum, count)
+            return output.unsqueeze(1), (cumsum, count)
         else:
             cumsum = (z * w).cumsum(dim=1)
             count = w.cumsum(dim=1)
             output = (cumsum + self.init_emb) / count.clamp(min=1e-6)
-            output = self.out_norm(output)
             return output, None
 
 
@@ -853,6 +854,7 @@ class MateLinAttnTrajEncoder(TrajEncoder):
         self.key_net = nn.Sequential(nn.Linear(d_model, d_model), nn.Dropout(dropout_qkv))
         self.value_net = nn.Sequential(nn.Linear(d_model, d_model), nn.Dropout(dropout_qkv))
         self.query_net = nn.Sequential(nn.Linear(d_model, d_model), nn.Dropout(dropout_qkv))
+        self.obs_value_net = nn.Sequential(nn.Linear(d_model, d_model), nn.Dropout(dropout_qkv))
         self.init_emb = nn.Parameter(torch.randn(d_model))
         self.out_norm = ff.Normalization(norm, d_model)
         self._emb_dim = d_model
@@ -879,6 +881,9 @@ class MateLinAttnTrajEncoder(TrajEncoder):
         z[dones] = 0.0
         return (S, z)
 
+    def transform_obs_for_shortcut(self, obs_emb: torch.Tensor) -> torch.Tensor:
+        return self.obs_value_net(obs_emb)
+
     def _phi(self, x: torch.Tensor) -> torch.Tensor:
         if self.feature_map == "elu":
             return F.elu(x) + 1
@@ -903,6 +908,7 @@ class MateLinAttnTrajEncoder(TrajEncoder):
             "passed in to drive the query."
         )
         x = self._ffn_forward(self.dropout_emb(self.inp(seq)))
+        x = self.out_norm(x)
         k = self._phi(self.key_net(x))           # (B, L, d)
         v = self.value_net(x)                    # (B, L, d)
         q = self._phi(self.query_net(obs_emb))   # (B, L, d)
@@ -917,7 +923,7 @@ class MateLinAttnTrajEncoder(TrajEncoder):
             new_z = prev_z + k1                                    # (B, d)
             num = torch.einsum("bij,bi->bj", new_S, q1) + self.init_emb
             den = (new_z * q1).sum(-1, keepdim=True).clamp(min=1e-6)
-            output = self.out_norm((num / den).unsqueeze(1))
+            output = (num / den).unsqueeze(1)
             if log_dict is not None:
                 with torch.no_grad():
                     log_dict["mate_linattn_denominator_mean"] = den.mean().item()
@@ -929,7 +935,7 @@ class MateLinAttnTrajEncoder(TrajEncoder):
             z_all = k.cumsum(dim=1)                       # (B, L, d)
             num = torch.einsum("blij,bli->blj", S_all, q) + self.init_emb
             den = (z_all * q).sum(-1, keepdim=True).clamp(min=1e-6)
-            output = self.out_norm(num / den)
+            output = num / den
             if log_dict is not None:
                 with torch.no_grad():
                     log_dict["mate_linattn_denominator_mean"] = den.mean().item()

@@ -90,7 +90,8 @@ jobs:
           --full_transition \
           --obs_shortcut \
           --obs_shortcut_scale tstep \
-          --traj_encoder mate_linattn
+          --traj_encoder mate_linattn \
+          --project_output
 
   - name: mate_linattn_full_trans_obs_sc_scale_full
     sku: ${NODES}x${MEM}G${GPUS}-H100
@@ -140,4 +141,5 @@ jobs:
           --full_transition \
           --obs_shortcut \
           --obs_shortcut_scale full \
-          --traj_encoder mate_linattn
+          --traj_encoder mate_linattn \
+          --project_output

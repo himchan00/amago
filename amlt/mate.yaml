@@ -96,7 +96,8 @@ jobs:
           --epochs 5000 \
           --val_interval 40 \
           --ckpt_interval 10 \
-          --traj_encoder mate
+          --traj_encoder mate \
+          --project_output
 
   - name: mate_full_trans_obs_sc_scale_tstep
     sku: ${NODES}x${MEM}G${GPUS}-A100
@@ -146,7 +147,8 @@ jobs:
           --full_transition \
           --obs_shortcut \
           --obs_shortcut_scale tstep \
-          --traj_encoder mate
+          --traj_encoder mate \
+          --project_output
 
   - name: mate_full_trans_obs_sc_scale_full
     sku: ${NODES}x${MEM}G${GPUS}-A100
@@ -196,4 +198,5 @@ jobs:
           --full_transition \
           --obs_shortcut \
           --obs_shortcut_scale full \
-          --traj_encoder mate
+          --traj_encoder mate \
+          --project_output

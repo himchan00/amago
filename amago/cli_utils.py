@@ -211,6 +211,11 @@ def add_common_cli(parser: ArgumentParser) -> ArgumentParser:
         choices=["tstep", "full"],
         help="Scale of obs_shortcut encoder: 'tstep' matches FFTstepEncoder, 'full' adds residual FFN blocks matching TrajEncoder.",
     )
+    parser.add_argument(
+        "--project_output",
+        action="store_true",
+        help="L2-normalize and rescale by sqrt(d) both the seq-model output and the observation embedding before concat."
+    )
     return parser
 
 

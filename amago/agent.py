@@ -19,7 +19,7 @@ import gymnasium as gym
 from amago.loading import Batch, MAGIC_PAD_VAL
 from amago.nets.tstep_encoders import TstepEncoder, FFObsEncoder
 from amago.nets import ff
-from amago.nets.traj_encoders import TrajEncoder
+from amago.nets.traj_encoders import TrajEncoder, MATETrajEncoder, MateLinAttnTrajEncoder
 from amago.nets import actor_critic
 from amago.nets.policy_dists import DiscreteLikeContinuous
 from amago import utils
@@ -354,6 +354,9 @@ class BaseAgent(nn.Module, abc.ABC):
                 for attr in ("sigma_reparam", "normformer_norms", "dropout_ff"):
                     if hasattr(traj, attr):
                         extra[attr] = getattr(traj, attr)
+            # RMS norm is used instead for mate
+            if self.traj_encoder_type is MATETrajEncoder:
+                extra["out_norm"] = "none"
             self.obs_encoder = FFObsEncoder(
                 obs_space=shortcut_space,
                 d_output=self.traj_encoder.emb_dim or self.tstep_encoder.emb_dim,  # fallback for Markov (emb_dim=0)
@@ -389,11 +392,19 @@ class BaseAgent(nn.Module, abc.ABC):
         obs: dict[str, torch.Tensor],
         obs_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Concatenate obs embedding to sequence model output if obs_shortcut is enabled."""
+        """Concatenate obs embedding to sequence model output if obs_shortcut is enabled.
+        """
+        project = getattr(self, "project_output", False)
         if getattr(self, "obs_shortcut", False):
             if obs_emb is None:
                 obs_emb = self._compute_obs_emb(obs)
+            obs_emb = self.traj_encoder.transform_obs_for_shortcut(obs_emb)
+            if project:
+                obs_emb = F.normalize(obs_emb, p=2, dim=-1) * (obs_emb.shape[-1] ** 0.5)
+                s_rep = F.normalize(s_rep, p=2, dim=-1) * (s_rep.shape[-1] ** 0.5)
             s_rep = torch.cat((s_rep, obs_emb), dim=-1)
+        elif project:
+            s_rep = F.normalize(s_rep, p=2, dim=-1) * (s_rep.shape[-1] ** 0.5)
         return s_rep
 
     def get_state_embedding(
@@ -680,9 +691,11 @@ class Agent(BaseAgent):
         pass_obs_keys_to_actor: Optional[Iterable[str]] = None,
         obs_shortcut: bool = False,
         obs_shortcut_scale: str = "tstep",
+        project_output: bool = False,
     ):
         self.obs_shortcut = obs_shortcut
         self.obs_shortcut_scale = obs_shortcut_scale
+        self.project_output = project_output
         super().__init__(
             obs_space=obs_space,
             rl2_space=rl2_space,
@@ -1304,6 +1317,7 @@ class MultiTaskAgent(Agent):
         pass_obs_keys_to_actor: Optional[Iterable[str]] = None,
         obs_shortcut: bool = False,
         obs_shortcut_scale: str = "tstep",
+        project_output: bool = False,
     ):
         super().__init__(
             obs_space=obs_space,
@@ -1333,6 +1347,7 @@ class MultiTaskAgent(Agent):
             pass_obs_keys_to_actor=pass_obs_keys_to_actor,
             obs_shortcut=obs_shortcut,
             obs_shortcut_scale=obs_shortcut_scale,
+            project_output=project_output,
         )
 
     def _sample_k_actions(self, dist, k: int):

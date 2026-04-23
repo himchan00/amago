@@ -346,6 +346,14 @@ def switch_traj_encoder(
                 f"{model_config}.n_layers": layers,
             }
         )
+    elif arch == "mate_linattn":
+        config.update(
+            {
+                f"{model_config}.d_model": memory_size,
+                f"{model_config}.d_ff": memory_size * 4,
+                f"{model_config}.n_layers": layers,
+            }
+        )
     elif arch == "lstm":
         config.update(
             {

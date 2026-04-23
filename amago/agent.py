@@ -374,13 +374,25 @@ class BaseAgent(nn.Module, abc.ABC):
             dim += self.obs_encoder.emb_dim
         return dim
 
+    def _compute_obs_emb(
+        self, obs: dict[str, torch.Tensor]
+    ) -> Optional[torch.Tensor]:
+        """Compute the observation embedding via FFObsEncoder, or None if obs_shortcut is disabled."""
+        if not getattr(self, "obs_shortcut", False):
+            return None
+        filtered = {k: v for k, v in obs.items() if not k.startswith("_prev_")}
+        return self.obs_encoder(filtered)
+
     def _apply_obs_shortcut(
-        self, s_rep: torch.Tensor, obs: dict[str, torch.Tensor]
+        self,
+        s_rep: torch.Tensor,
+        obs: dict[str, torch.Tensor],
+        obs_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Concatenate obs embedding to sequence model output if obs_shortcut is enabled."""
         if getattr(self, "obs_shortcut", False):
-            filtered = {k: v for k, v in obs.items() if not k.startswith("_prev_")}
-            obs_emb = self.obs_encoder(filtered)
+            if obs_emb is None:
+                obs_emb = self._compute_obs_emb(obs)
             s_rep = torch.cat((s_rep, obs_emb), dim=-1)
         return s_rep
 
@@ -406,10 +418,11 @@ class BaseAgent(nn.Module, abc.ABC):
                 - Updated hidden state of the TrajEncoder.
         """
         tstep_emb = self.tstep_encoder(obs=obs, rl2s=rl2s)
+        obs_emb = self._compute_obs_emb(obs)
         traj_emb_t, hidden_state = self.traj_encoder(
-            tstep_emb, time_idxs=time_idxs, hidden_state=hidden_state
+            tstep_emb, time_idxs=time_idxs, hidden_state=hidden_state, obs_emb=obs_emb
         )
-        traj_emb_t = self._apply_obs_shortcut(traj_emb_t, obs)
+        traj_emb_t = self._apply_obs_shortcut(traj_emb_t, obs, obs_emb=obs_emb)
         return traj_emb_t, hidden_state
 
     @abc.abstractmethod
@@ -847,10 +860,11 @@ class Agent(BaseAgent):
             :, 1:, ...
         ]
 
+        obs_emb = self._compute_obs_emb(batch.obs)
         s_rep, _ = self.traj_encoder(
-            seq=o, time_idxs=batch.time_idxs, hidden_state=None
+            seq=o, time_idxs=batch.time_idxs, hidden_state=None, obs_emb=obs_emb
         )
-        s_rep = self._apply_obs_shortcut(s_rep, batch.obs)
+        s_rep = self._apply_obs_shortcut(s_rep, batch.obs, obs_emb=obs_emb)
 
         a_dist = self.actor(s_rep, straight_from_obs=straight_from_obs)
 
@@ -994,9 +1008,10 @@ class Agent(BaseAgent):
         ## Sequence Embedding ##
         ########################
         # one trajectory encoder forward pass
-        s_rep, hidden_state = self.traj_encoder(seq=o, time_idxs=batch.time_idxs, hidden_state=None, log_dict=active_log_dict)
+        obs_emb = self._compute_obs_emb(batch.obs)
+        s_rep, hidden_state = self.traj_encoder(seq=o, time_idxs=batch.time_idxs, hidden_state=None, log_dict=active_log_dict, obs_emb=obs_emb)
         assert s_rep.shape == (B, L, D_emb)
-        s_rep = self._apply_obs_shortcut(s_rep, batch.obs)
+        s_rep = self._apply_obs_shortcut(s_rep, batch.obs, obs_emb=obs_emb)
 
         ################
         ## a ~ \pi(s) ##
@@ -1355,10 +1370,11 @@ class MultiTaskAgent(Agent):
             :, 1:, ...
         ]
 
+        obs_emb = self._compute_obs_emb(batch.obs)
         s_rep, _ = self.traj_encoder(
-            seq=o, time_idxs=batch.time_idxs, hidden_state=None
+            seq=o, time_idxs=batch.time_idxs, hidden_state=None, obs_emb=obs_emb
         )
-        s_rep = self._apply_obs_shortcut(s_rep, batch.obs)
+        s_rep = self._apply_obs_shortcut(s_rep, batch.obs, obs_emb=obs_emb)
 
         a_dist = self.actor(s_rep, straight_from_obs=straight_from_obs)
         if self.discrete:
@@ -1432,9 +1448,10 @@ class MultiTaskAgent(Agent):
         ########################
         ## Sequence Embedding ##
         ########################
-        s_rep, hidden_state = self.traj_encoder(seq=o, time_idxs=batch.time_idxs, hidden_state=None, log_dict=active_log_dict)
+        obs_emb = self._compute_obs_emb(batch.obs)
+        s_rep, hidden_state = self.traj_encoder(seq=o, time_idxs=batch.time_idxs, hidden_state=None, log_dict=active_log_dict, obs_emb=obs_emb)
         assert s_rep.shape == (B, L, D_emb)
-        s_rep = self._apply_obs_shortcut(s_rep, batch.obs)
+        s_rep = self._apply_obs_shortcut(s_rep, batch.obs, obs_emb=obs_emb)
 
         ################
         ## a ~ \pi(s) ##

@@ -365,6 +365,16 @@ Key properties:
 - `--memory_size` and `--memory_layers` map to `d_model` and `n_layers` (same convention as the Transformer).
 
 
+### `--traj_encoder mate_linattn`
+
+**MATE — linear-attention variant.** Same FFN backbone as `mate`, but the cumulative-average aggregation is replaced with a causal linear-attention memory:
+
+- **Keys / values** come from the transition embedding (FFN over `seq`).
+- **Query** comes from the observation embedding (`obs_emb`), so this encoder **requires `--obs_shortcut`** (with any `--obs_shortcut_scale`).
+- Memory state is `(S, z)` where `S = Σ φ(k_i) ⊗ v_i` and `z = Σ φ(k_i)`; the output is `(S · φ(q) + b) / max(z · φ(q), 1e-6)`. The feature map defaults to `φ(x) = elu(x) + 1`.
+- `--memory_size` and `--memory_layers` map to `d_model` and `n_layers` (same as `mate`). State size scales as `O(d_model²)` instead of `O(d_model)`.
+
+
 ---
 
 <br>

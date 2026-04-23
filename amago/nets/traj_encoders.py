@@ -7,6 +7,7 @@ from typing import Optional, Any, Tuple
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 import numpy as np
 import gin
 
@@ -139,6 +140,7 @@ class TrajEncoder(nn.Module, ABC):
         time_idxs: torch.Tensor,
         hidden_state: Optional[Any] = None,
         log_dict: Optional[dict] = None,
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[Any]]:
         """Sequence model forward pass.
 
@@ -245,7 +247,7 @@ class FFTrajEncoder(TrajEncoder):
         return traj_emb
 
     def forward(
-        self, seq, time_idxs=None, hidden_state=None, log_dict: Optional[dict] = None
+        self, seq, time_idxs=None, hidden_state=None, log_dict: Optional[dict] = None, **kwargs
     ):
         return self._traj_blocks_forward(seq), hidden_state
 
@@ -302,7 +304,7 @@ class GRUTrajEncoder(TrajEncoder):
         return hidden_state
 
     def forward(
-        self, seq, time_idxs=None, hidden_state=None, log_dict: Optional[dict] = None
+        self, seq, time_idxs=None, hidden_state=None, log_dict: Optional[dict] = None, **kwargs
     ):
         output_seq, new_hidden_state = self.rnn(seq, hidden_state)
         out = self.out_norm(self.out(output_seq))
@@ -459,6 +461,7 @@ class TformerTrajEncoder(TrajEncoder):
         time_idxs: torch.Tensor,
         hidden_state: Optional[transformer.TformerHiddenState] = None,
         log_dict: Optional[dict] = None,
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[transformer.TformerHiddenState]]:
         assert time_idxs is not None
         return self.tformer(seq, pos_idxs=time_idxs, hidden_state=hidden_state)
@@ -604,6 +607,7 @@ class MambaTrajEncoder(TrajEncoder):
         time_idxs: Optional[torch.Tensor] = None,
         hidden_state: Optional[_MambaHiddenState] = None,
         log_dict: Optional[dict] = None,
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[_MambaHiddenState]]:
         seq = self.inp(seq)
         if hidden_state is None:
@@ -734,6 +738,7 @@ class MATETrajEncoder(TrajEncoder):
         time_idxs: Optional[torch.Tensor] = None,
         hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         log_dict: Optional[dict] = None,
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         B, L, _ = seq.shape
         seq = self.dropout_emb(self.inp(seq))
@@ -761,6 +766,174 @@ class MATETrajEncoder(TrajEncoder):
             count = w.cumsum(dim=1)
             output = (cumsum + self.init_emb) / count.clamp(min=1e-6)
             output = self.out_norm(output)
+            return output, None
+
+
+@gin.configurable
+@register_traj_encoder("mate_linattn")
+class MateLinAttnTrajEncoder(TrajEncoder):
+    """Linear-attention MATE Trajectory Encoder.
+
+    Variant of MATE where the cumulative-average aggregation is replaced by a
+    causal linear-attention memory: keys/values come from the transition
+    embedding (FFN backbone over ``seq``), and the query is computed from a
+    separate observation embedding (passed in via ``obs_emb``).
+
+    Memory state ``(S, z)`` is the standard linear-attention KV-sum and key-sum:
+
+    .. math::
+        S_t = S_0 + \\sum_{i \\leq t} \\phi(k_i) \\otimes v_i, \\quad
+        z_t = z_0 + \\sum_{i \\leq t} \\phi(k_i)
+
+    and the output is
+
+    .. math::
+        o_t = \\frac{S_t \\phi(q_t) + b}{\\max(\\phi(z_t)^\\top \\phi(q_t),\\, 10^{-6})}.
+
+    Ported from Memory-RL (policies/seq_models/mate_linattn.py). Requires
+    ``obs_shortcut=True`` so that an observation embedding is available to
+    drive the query.
+
+    Args:
+        tstep_dim: Dimension of the input timestep representation.
+        max_seq_len: Maximum sequence length.
+
+    Keyword Args:
+        d_model: Dimension of the main residual stream and output. Defaults to 256.
+        d_ff: Dimension of feed-forward network in residual blocks. Defaults to 1024.
+        n_layers: Number of FFN residual blocks. Defaults to 3.
+        dropout_ff: Dropout rate for FFN layers. Defaults to 0.05.
+        dropout_emb: Dropout rate for input embedding. Defaults to 0.05.
+        dropout_qkv: Dropout rate for the K/V/Q projections. Defaults to 0.05.
+        activation: Activation function. Defaults to "leaky_relu".
+        norm: Normalization method. Defaults to "layer".
+        sigma_reparam: Whether to use sigma-reparam layers. Defaults to True.
+        normformer_norms: Whether to use extra NormFormer normalization. Defaults to True.
+        feature_map: Linear-attention feature map. Only "elu" (``elu(x) + 1``)
+            is currently supported.
+    """
+
+    def __init__(
+        self,
+        tstep_dim: int,
+        max_seq_len: int,
+        d_model: int = 256,
+        d_ff: int = 1024,
+        n_layers: int = 3,
+        dropout_ff: float = 0.05,
+        dropout_emb: float = 0.05,
+        dropout_qkv: float = 0.05,
+        activation: str = "leaky_relu",
+        norm: str = "layer",
+        sigma_reparam: bool = True,
+        normformer_norms: bool = True,
+        feature_map: str = "elu",
+    ):
+        super().__init__(tstep_dim, max_seq_len)
+        self.sigma_reparam = sigma_reparam
+        self.normformer_norms = normformer_norms
+        self.dropout_ff = dropout_ff
+        self.feature_map = feature_map
+        self.inp = nn.Linear(tstep_dim, d_model)
+        self.dropout_emb = nn.Dropout(dropout_emb)
+        self.layers = nn.ModuleList(
+            [
+                transformer.TransformerFFNBlock(
+                    d_model=d_model,
+                    d_ff=d_ff,
+                    dropout_ff=dropout_ff,
+                    activation=activation,
+                    norm=norm,
+                    sigma_reparam=sigma_reparam,
+                    normformer_norms=normformer_norms,
+                )
+                for _ in range(n_layers)
+            ]
+        )
+        self.key_net = nn.Sequential(nn.Linear(d_model, d_model), nn.Dropout(dropout_qkv))
+        self.value_net = nn.Sequential(nn.Linear(d_model, d_model), nn.Dropout(dropout_qkv))
+        self.query_net = nn.Sequential(nn.Linear(d_model, d_model), nn.Dropout(dropout_qkv))
+        self.init_emb = nn.Parameter(torch.randn(d_model))
+        self.out_norm = ff.Normalization(norm, d_model)
+        self._emb_dim = d_model
+        self.n_layers = n_layers
+
+    @property
+    def emb_dim(self) -> int:
+        return self._emb_dim
+
+    def init_hidden_state(
+        self, batch_size: int, device: torch.device
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        S = torch.zeros(batch_size, self._emb_dim, self._emb_dim, device=device)
+        z = torch.zeros(batch_size, self._emb_dim, device=device)
+        return (S, z)
+
+    def reset_hidden_state(
+        self, hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]], dones: np.ndarray
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        if hidden_state is None:
+            return None
+        S, z = hidden_state
+        S[dones] = 0.0
+        z[dones] = 0.0
+        return (S, z)
+
+    def _phi(self, x: torch.Tensor) -> torch.Tensor:
+        if self.feature_map == "elu":
+            return F.elu(x) + 1
+        raise NotImplementedError(f"Feature map {self.feature_map}")
+
+    def _ffn_forward(self, seq: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            seq = layer(seq)
+        return seq
+
+    def forward(
+        self,
+        seq: torch.Tensor,
+        time_idxs: Optional[torch.Tensor] = None,
+        hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        log_dict: Optional[dict] = None,
+        obs_emb: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+        assert obs_emb is not None, (
+            "mate_linattn requires obs_shortcut=True so that obs_emb can be "
+            "passed in to drive the query."
+        )
+        x = self._ffn_forward(self.dropout_emb(self.inp(seq)))
+        k = self._phi(self.key_net(x))           # (B, L, d)
+        v = self.value_net(x)                    # (B, L, d)
+        q = self._phi(self.query_net(obs_emb))   # (B, L, d)
+
+        if hidden_state is not None:
+            assert not self.training
+            prev_S, prev_z = hidden_state
+            k1 = k.squeeze(1)
+            v1 = v.squeeze(1)
+            q1 = q.squeeze(1)
+            new_S = prev_S + k1.unsqueeze(-1) * v1.unsqueeze(-2)  # (B, d, d)
+            new_z = prev_z + k1                                    # (B, d)
+            num = torch.einsum("bij,bi->bj", new_S, q1) + self.init_emb
+            den = (new_z * q1).sum(-1, keepdim=True).clamp(min=1e-6)
+            output = self.out_norm((num / den).unsqueeze(1))
+            if log_dict is not None:
+                with torch.no_grad():
+                    log_dict["mate_linattn_denominator_mean"] = den.mean().item()
+                    log_dict["mate_linattn_denominator_std"] = den.std().item()
+            return output, (new_S, new_z)
+        else:
+            kv = k.unsqueeze(-1) * v.unsqueeze(-2)        # (B, L, d, d)  S[i,j] = k[i] v[j]
+            S_all = kv.cumsum(dim=1)                      # (B, L, d, d)
+            z_all = k.cumsum(dim=1)                       # (B, L, d)
+            num = torch.einsum("blij,bli->blj", S_all, q) + self.init_emb
+            den = (z_all * q).sum(-1, keepdim=True).clamp(min=1e-6)
+            output = self.out_norm(num / den)
+            if log_dict is not None:
+                with torch.no_grad():
+                    log_dict["mate_linattn_denominator_mean"] = den.mean().item()
+                    log_dict["mate_linattn_denominator_std"] = den.std().item()
             return output, None
 
 
@@ -824,6 +997,7 @@ class LSTMTrajEncoder(TrajEncoder):
         time_idxs: Optional[torch.Tensor] = None,
         hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         log_dict: Optional[dict] = None,
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         output_seq, new_hidden_state = self.lstm(seq, hidden_state)
         out = self.out_norm(self.out(output_seq))
@@ -864,6 +1038,7 @@ class MarkovTrajEncoder(TrajEncoder):
         time_idxs: Optional[torch.Tensor] = None,
         hidden_state: Optional[Any] = None,
         log_dict: Optional[dict] = None,
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[Any]]:
         B, L, _ = seq.shape
         return seq.new_zeros(B, L, 0), hidden_state

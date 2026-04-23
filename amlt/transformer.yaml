@@ -1,16 +1,20 @@
 description: >
-  ML45 - transformer ablations: full transition, obs shortcut, and obs shortcut scale
+  ML45 - transformer ablations: full transition, obs shortcut, and obs shortcut scale.
+  NOTE: This YAML is configured for RESUME. Each job hardcodes OLD_TIMESTAMP to a
+  prior experiment name so --timestamp + CKPT_DIR pick up old checkpoints and
+  preserve wandb run continuity (run_name+timestamp → md5 → same wandb id).
+  When starting a brand-new run, replace OLD_TIMESTAMP with $$AMLT_EXPERIMENT_NAME.
 
 env_defaults:
   NODES: 1
   GPUS: 1
-  MEM: 80
+  MEM: 40
   BASE_DIR: /mnt/v-hihwang/projects/amago
 
 target:
   service: sing
   workspace_name: wsgcrrbt
-  name: msrresrchvc
+  name: msrresrchbasicvc
 
 storage:
   my_storage:
@@ -50,7 +54,7 @@ jobs:
   - name: transformer
     sku: ${NODES}x${MEM}G${GPUS}-A100
     process_count_per_node: 1
-    sla_tier: Premium
+    sla_tier: Standard
     execution_mode: basic
     submit_args:
       env:
@@ -64,25 +68,39 @@ jobs:
       - "export LD_LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:/home/aiscuser/.mujoco/mujoco210/bin:$$LD_LIBRARY_PATH"
       - "export C_INCLUDE_PATH=/home/aiscuser/.conda/envs/amago/include:$$C_INCLUDE_PATH"
       - "export LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:$$LIBRARY_PATH"
-      - conda run --no-capture-output --name amago
-          python examples/07_metaworld.py
-          --run_name transformer
-          --benchmark ml45
-          --buffer_dir ${BASE_DIR}/buffer
-          --parallel_actors 40
-          --memory_size 320
-          --timesteps_per_epoch 1501
-          --agent_type multitask
-          --max_seq_len 256
-          --memory_layers 3
-          --dset_max_size 25000
-          --epochs 5000
-          --val_interval 40
+      - |
+        OLD_TIMESTAMP=exact-mullet
+        CKPT_DIR=${BASE_DIR}/buffer/transformer_$$OLD_TIMESTAMP/ckpts/training_states
+        LATEST_EPOCH=$$(ls "$$CKPT_DIR" 2>/dev/null | grep -o 'epoch_[0-9]*' | grep -o '[0-9]*' | sort -n | tail -1)
+        RESUME_ARGS=""
+        if [ -n "$$LATEST_EPOCH" ]; then
+          echo "[INFO] Resuming from checkpoint at epoch $$LATEST_EPOCH"
+          RESUME_ARGS="--ckpt $$LATEST_EPOCH"
+        else
+          echo "[INFO] No checkpoint found, starting fresh training."
+        fi
+        conda run --no-capture-output --name amago \
+          python examples/07_metaworld.py \
+          --run_name transformer \
+          --timestamp $$OLD_TIMESTAMP \
+          $$RESUME_ARGS \
+          --benchmark ml45 \
+          --buffer_dir ${BASE_DIR}/buffer \
+          --parallel_actors 40 \
+          --memory_size 320 \
+          --timesteps_per_epoch 1501 \
+          --agent_type multitask \
+          --max_seq_len 256 \
+          --memory_layers 3 \
+          --dset_max_size 25000 \
+          --epochs 5000 \
+          --val_interval 40 \
+          --ckpt_interval 10
 
   - name: transformer_full_trans_obs_sc_scale_tstep
     sku: ${NODES}x${MEM}G${GPUS}-A100
     process_count_per_node: 1
-    sla_tier: Premium
+    sla_tier: Standard
     execution_mode: basic
     submit_args:
       env:
@@ -96,28 +114,42 @@ jobs:
       - "export LD_LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:/home/aiscuser/.mujoco/mujoco210/bin:$$LD_LIBRARY_PATH"
       - "export C_INCLUDE_PATH=/home/aiscuser/.conda/envs/amago/include:$$C_INCLUDE_PATH"
       - "export LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:$$LIBRARY_PATH"
-      - conda run --no-capture-output --name amago
-          python examples/07_metaworld.py
-          --run_name transformer_full_trans_obs_sc_scale_tstep
-          --benchmark ml45
-          --buffer_dir ${BASE_DIR}/buffer
-          --parallel_actors 40
-          --memory_size 320
-          --timesteps_per_epoch 1501
-          --agent_type multitask
-          --max_seq_len 256
-          --memory_layers 3
-          --dset_max_size 25000
-          --epochs 5000
-          --val_interval 40
-          --full_transition
-          --obs_shortcut
+      - |
+        OLD_TIMESTAMP=super-oarfish
+        CKPT_DIR=${BASE_DIR}/buffer/transformer_full_trans_obs_sc_scale_tstep_$$OLD_TIMESTAMP/ckpts/training_states
+        LATEST_EPOCH=$$(ls "$$CKPT_DIR" 2>/dev/null | grep -o 'epoch_[0-9]*' | grep -o '[0-9]*' | sort -n | tail -1)
+        RESUME_ARGS=""
+        if [ -n "$$LATEST_EPOCH" ]; then
+          echo "[INFO] Resuming from checkpoint at epoch $$LATEST_EPOCH"
+          RESUME_ARGS="--ckpt $$LATEST_EPOCH"
+        else
+          echo "[INFO] No checkpoint found, starting fresh training."
+        fi
+        conda run --no-capture-output --name amago \
+          python examples/07_metaworld.py \
+          --run_name transformer_full_trans_obs_sc_scale_tstep \
+          --timestamp $$OLD_TIMESTAMP \
+          $$RESUME_ARGS \
+          --benchmark ml45 \
+          --buffer_dir ${BASE_DIR}/buffer \
+          --parallel_actors 40 \
+          --memory_size 320 \
+          --timesteps_per_epoch 1501 \
+          --agent_type multitask \
+          --max_seq_len 256 \
+          --memory_layers 3 \
+          --dset_max_size 25000 \
+          --epochs 5000 \
+          --val_interval 40 \
+          --ckpt_interval 10 \
+          --full_transition \
+          --obs_shortcut \
           --obs_shortcut_scale tstep
 
   - name: transformer_full_trans_obs_sc_scale_full
     sku: ${NODES}x${MEM}G${GPUS}-A100
     process_count_per_node: 1
-    sla_tier: Premium
+    sla_tier: Standard
     execution_mode: basic
     submit_args:
       env:
@@ -131,20 +163,34 @@ jobs:
       - "export LD_LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:/home/aiscuser/.mujoco/mujoco210/bin:$$LD_LIBRARY_PATH"
       - "export C_INCLUDE_PATH=/home/aiscuser/.conda/envs/amago/include:$$C_INCLUDE_PATH"
       - "export LIBRARY_PATH=/home/aiscuser/.conda/envs/amago/lib:$$LIBRARY_PATH"
-      - conda run --no-capture-output --name amago
-          python examples/07_metaworld.py
-          --run_name transformer_full_trans_obs_sc_scale_full
-          --benchmark ml45
-          --buffer_dir ${BASE_DIR}/buffer
-          --parallel_actors 40
-          --memory_size 320
-          --timesteps_per_epoch 1501
-          --agent_type multitask
-          --max_seq_len 256
-          --memory_layers 3
-          --dset_max_size 25000
-          --epochs 5000
-          --val_interval 40
-          --full_transition
-          --obs_shortcut
+      - |
+        OLD_TIMESTAMP=super-oarfish
+        CKPT_DIR=${BASE_DIR}/buffer/transformer_full_trans_obs_sc_scale_full_$$OLD_TIMESTAMP/ckpts/training_states
+        LATEST_EPOCH=$$(ls "$$CKPT_DIR" 2>/dev/null | grep -o 'epoch_[0-9]*' | grep -o '[0-9]*' | sort -n | tail -1)
+        RESUME_ARGS=""
+        if [ -n "$$LATEST_EPOCH" ]; then
+          echo "[INFO] Resuming from checkpoint at epoch $$LATEST_EPOCH"
+          RESUME_ARGS="--ckpt $$LATEST_EPOCH"
+        else
+          echo "[INFO] No checkpoint found, starting fresh training."
+        fi
+        conda run --no-capture-output --name amago \
+          python examples/07_metaworld.py \
+          --run_name transformer_full_trans_obs_sc_scale_full \
+          --timestamp $$OLD_TIMESTAMP \
+          $$RESUME_ARGS \
+          --benchmark ml45 \
+          --buffer_dir ${BASE_DIR}/buffer \
+          --parallel_actors 40 \
+          --memory_size 320 \
+          --timesteps_per_epoch 1501 \
+          --agent_type multitask \
+          --max_seq_len 256 \
+          --memory_layers 3 \
+          --dset_max_size 25000 \
+          --epochs 5000 \
+          --val_interval 40 \
+          --ckpt_interval 10 \
+          --full_transition \
+          --obs_shortcut \
           --obs_shortcut_scale full

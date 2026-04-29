@@ -697,6 +697,7 @@ class MATETrajEncoder(TrajEncoder):
                 for _ in range(n_layers)
             ]
         )
+        self.out_norm = ff.Normalization(norm, d_model)
         self.init_emb = nn.Parameter(torch.randn(d_model))
         self.use_gate = use_gate
         print("Use gate in MATE:", use_gate)
@@ -746,6 +747,7 @@ class MATETrajEncoder(TrajEncoder):
         B, L, _ = seq.shape
         seq = self.dropout_emb(self.inp(seq))
         z = self._ffn_forward(seq)
+        z = self.out_norm(z)
 
         if self.use_gate:
             w = torch.sigmoid(self.gate(seq))  # (B, L, 1)

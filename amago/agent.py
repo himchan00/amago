@@ -19,7 +19,7 @@ import gymnasium as gym
 from amago.loading import Batch, MAGIC_PAD_VAL
 from amago.nets.tstep_encoders import TstepEncoder, FFObsEncoder
 from amago.nets import ff
-from amago.nets.traj_encoders import TrajEncoder, MATETrajEncoder, MateLinAttnTrajEncoder
+from amago.nets.traj_encoders import TrajEncoder
 from amago.nets import actor_critic
 from amago.nets.policy_dists import DiscreteLikeContinuous
 from amago import utils
@@ -354,9 +354,7 @@ class BaseAgent(nn.Module, abc.ABC):
                 for attr in ("sigma_reparam", "normformer_norms", "dropout_ff"):
                     if hasattr(traj, attr):
                         extra[attr] = getattr(traj, attr)
-            # RMS norm is used instead for mate
-            if self.traj_encoder_type is MATETrajEncoder:
-                extra["out_norm"] = "none"
+
             self.obs_encoder = FFObsEncoder(
                 obs_space=shortcut_space,
                 d_output=self.traj_encoder.emb_dim or self.tstep_encoder.emb_dim,  # fallback for Markov (emb_dim=0)

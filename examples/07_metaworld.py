@@ -27,6 +27,11 @@ def add_cli(parser):
         action="store_true",
         help="Enable learned per-step gating in MATE trajectory encoder.",
     )
+    parser.add_argument(
+        "--oracle",
+        action="store_true",
+        help="Append hidden task identity (train-class one-hot + rand_vec) to observations.",
+    )
     return parser
 
 
@@ -68,8 +73,8 @@ if __name__ == "__main__":
     )
     cli_utils.use_config(config, args.configs)
 
-    make_train_env = lambda: Metaworld(args.benchmark, "train", k_episodes=args.k)
-    make_test_env = lambda: Metaworld(args.benchmark, "test", k_episodes=args.k)
+    make_train_env = lambda: Metaworld(args.benchmark, "train", k_episodes=args.k, oracle=args.oracle)
+    make_test_env = lambda: Metaworld(args.benchmark, "test", k_episodes=args.k, oracle=args.oracle)
 
     group_name = (
         f"{args.run_name}_metaworld_{args.benchmark}_K_{args.k}_L_{args.max_seq_len}"

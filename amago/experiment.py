@@ -3,6 +3,7 @@ Start and launch training runs (main :class:`Experiment`).
 """
 
 import os
+import shutil
 import time
 import warnings
 import contextlib
@@ -417,15 +418,66 @@ class Experiment:
             ckpt_path = os.path.join(self.ckpt_dir, "training_states", ckpt_name)
             self.load_checkpoint_from_path(ckpt_path, is_accelerate_state=True)
         self.epoch = epoch
+        # Roll back the replay buffer to its ckpt-paired snapshot: drop any
+        # trajectories collected by policies newer than the loaded ckpt so
+        # the (policy, buffer) pairing assumed by off-policy training is
+        # preserved across preempt-resume cycles. Marker is written by
+        # save_checkpoint last; when absent (legacy ckpt), skip silently.
+        if resume_training_state:
+            ckpt_name = f"{self.run_name}_epoch_{epoch}"
+            ckpt_path = os.path.join(self.ckpt_dir, "training_states", ckpt_name)
+            marker_path = os.path.join(ckpt_path, ".complete")
+            if self.accelerator.is_main_process and os.path.exists(marker_path):
+                try:
+                    with open(marker_path) as f:
+                        lines = f.read().strip().split("\n")
+                    if len(lines) >= 2:
+                        save_unix_time = float(lines[1])
+                        if hasattr(self.dataset, "filter_by_max_unix_time"):
+                            stats = self.dataset.filter_by_max_unix_time(save_unix_time)
+                            self.accelerator.print(
+                                f"[ckpt-buffer sync] Filtered buffer: removed "
+                                f"{stats['removed']} trajs newer than ckpt save time, "
+                                f"kept {stats['kept']}."
+                            )
+                except (ValueError, OSError) as e:
+                    self.accelerator.print(
+                        f"[ckpt-buffer sync] Marker parse failed ({e}); "
+                        "skipping buffer rollback."
+                    )
+            self.accelerator.wait_for_everyone()
 
     def save_checkpoint(self) -> None:
         """Save both the training state and the policy weights to the ckpt_dir."""
         ckpt_name = f"{self.run_name}_epoch_{self.epoch}"
-        self.accelerator.save_state(
-            os.path.join(self.ckpt_dir, "training_states", ckpt_name),
-            safe_serialization=True,
-        )
+        ckpt_path = os.path.join(self.ckpt_dir, "training_states", ckpt_name)
+        tmp_path = ckpt_path + ".tmp"
+        # Atomic dir save: write the multi-file accelerator state into a `.tmp`
+        # sibling directory first, then atomically rename. Without this, a
+        # background blob-sync (or a SIGTERM-triggered final sync under preempt)
+        # can capture the directory mid-write and produce an unloadable
+        # checkpoint missing optimizer.bin / scheduler.bin / random_states.
+        if self.accelerator.is_main_process and os.path.exists(tmp_path):
+            shutil.rmtree(tmp_path)
+        self.accelerator.wait_for_everyone()
+        self.accelerator.save_state(tmp_path, safe_serialization=True)
+        self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
+            if os.path.exists(ckpt_path):
+                shutil.rmtree(ckpt_path)
+            os.replace(tmp_path, ckpt_path)
+            # Marker file: written LAST after the dir-rename succeeds. Records
+            # epoch + save unix_time. The yaml bg-sync uses 2-pass rsync to
+            # ensure this marker reaches blob only after all data files, so
+            # marker presence on blob == "ckpt is durable + complete". Resume
+            # uses the unix_time to roll the replay buffer back to its
+            # ckpt-paired snapshot (see load_checkpoint).
+            marker_path = os.path.join(ckpt_path, ".complete")
+            save_unix_time = time.time()
+            with open(marker_path, "w") as f:
+                f.write(f"{self.epoch}\n{save_unix_time}\n")
+                f.flush()
+                os.fsync(f.fileno())
             # create backup of raw weights unrelated to the more complex process of resuming an accelerate state
             backup_path = os.path.join(
                 self.ckpt_dir, "policy_weights", f"policy_epoch_{self.epoch}.pt"
@@ -476,8 +528,8 @@ class Experiment:
             num_workers=self.dloader_workers,
             collate_fn=RLData_pad_collate,
             pin_memory=True,
-            persistent_workers=self.dloader_workers > 0,
-            prefetch_factor=2 if self.dloader_workers > 0 else None,
+            persistent_workers=False,
+            prefetch_factor=4 if self.dloader_workers > 0 else None,
         )
         self.train_dloader = self.accelerator.prepare(train_dloader)
         return self.train_dloader
@@ -811,12 +863,21 @@ class Experiment:
         """Log a dict of metrics to the `key` panel of the wandb console alongisde current
         x-axis metrics."""
         log_dict = {}
+        # Collect 0-dim tensors first, then sync once via batched .cpu() to avoid N
+        # cudaDeviceSynchronize calls (one per .item()). See LeanRL/memory-rl perf notes.
+        scalar_keys = []
+        scalar_tensors = []
         for k, v in metrics_dict.items():
             if isinstance(v, torch.Tensor):
                 if v.ndim == 0:
-                    log_dict[k] = v.detach().cpu().float().item()
+                    scalar_keys.append(k)
+                    scalar_tensors.append(v.detach())
             else:
                 log_dict[k] = v
+        if scalar_tensors:
+            stacked = torch.stack(scalar_tensors).float().cpu().tolist()
+            for k, val in zip(scalar_keys, stacked):
+                log_dict[k] = val
 
         if self.log_to_wandb:
             wandb_dict = {

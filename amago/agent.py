@@ -1241,11 +1241,11 @@ class Agent(BaseAgent):
 
     def _popart_stats(self) -> dict:
         return {
-            "PopArt mu (mean over gamma)": self.popart.mu.data.mean().item(),
-            "PopArt nu (mean over gamma)": self.popart.nu.data.mean().item(),
-            "PopArt w (mean over gamma)": self.popart.w.data.mean().item(),
-            "PopArt b (mean over gamma)": self.popart.b.data.mean().item(),
-            "PopArt sigma (mean over gamma)": self.popart.sigma.mean().item(),
+            "PopArt mu (mean over gamma)": self.popart.mu.data.mean().detach(),
+            "PopArt nu (mean over gamma)": self.popart.nu.data.mean().detach(),
+            "PopArt w (mean over gamma)": self.popart.w.data.mean().detach(),
+            "PopArt b (mean over gamma)": self.popart.b.data.mean().detach(),
+            "PopArt sigma (mean over gamma)": self.popart.sigma.mean().detach(),
         }
 
     def get_grad_norms(self) -> dict[str, float]:

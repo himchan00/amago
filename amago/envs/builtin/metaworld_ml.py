@@ -33,7 +33,7 @@ class Metaworld(AMAGOEnv):
         k_episodes: The number of attempts the policy has to adapt to the current task.
     """
 
-    def __init__(self, benchmark_name: str, split: str, k_episodes: int):
+    def __init__(self, benchmark_name: str, split: str, k_episodes: int, oracle: bool = False):
         if benchmark_name == "ml10":
             benchmark = metaworld.ML10()
         elif benchmark_name == "ml45":
@@ -44,7 +44,7 @@ class Metaworld(AMAGOEnv):
             except:
                 raise ValueError(f"Unrecognized metaworld benchmark {benchmark_name}")
 
-        env = KEpisodeMetaworld(benchmark, split, k_episodes)
+        env = KEpisodeMetaworld(benchmark, split, k_episodes, oracle=oracle)
         super().__init__(
             env=env,
             env_name=f"metaworld_{benchmark_name}",
@@ -72,21 +72,67 @@ class KEpisodeMetaworld(gym.Env):
     reward_scales = {}
 
     def __init__(
-        self, benchmark, split: str, k_episodes: int, max_episode_length: int = 500
+        self, benchmark, split: str, k_episodes: int, max_episode_length: int = 500,
+        oracle: bool = False,
     ):
         assert split in ["train", "test"]
         self.benchmark = benchmark
         self.split = split
         self.k_episodes = k_episodes
+        self.oracle = oracle
         self._envs = self.get_env_funcs(benchmark, train_set=split == "train")
+
+        # Build oracle context spec from train_classes only (matches Memory-RL semantics).
+        # Test-split classes (if any) get an all-zero one-hot, marking them as out-of-distribution.
+        if self.oracle:
+            self._train_class_names = sorted(benchmark.train_classes.keys())
+            self._train_class_to_idx = {n: i for i, n in enumerate(self._train_class_names)}
+            self._n_classes = len(self._train_class_names)
+            self._rand_vec_dim = self._compute_rand_vec_dim(benchmark)
+            self._context_dim = self._n_classes + self._rand_vec_dim
+        else:
+            self._context_dim = 0
+        self._cached_context = np.zeros(self._context_dim, dtype=np.float32)
+
         self.reset()
         self.action_space = space_convert(self.env.action_space)
         self.max_episode_length = max_episode_length
         og_obs = space_convert(self.env.observation_space)
+        # obs layout: [original obs | soft_reset_flag | (oracle context if enabled)]
+        low = og_obs.low.tolist() + [0.0] + [-np.inf] * self._context_dim
+        high = og_obs.high.tolist() + [1.0] + [np.inf] * self._context_dim
         self.observation_space = gym.spaces.Box(
-            low=np.asarray(og_obs.low.tolist() + [0]),
-            high=np.asarray(og_obs.high.tolist() + [1.0]),
+            low=np.asarray(low, dtype=np.float32),
+            high=np.asarray(high, dtype=np.float32),
         )
+
+    @staticmethod
+    def _compute_rand_vec_dim(benchmark) -> int:
+        """Probe each train class once to find the maximum rand_vec dimension."""
+        max_dim = 0
+        for name, env_cls in benchmark.train_classes.items():
+            env = env_cls()
+            task = next(t for t in benchmark.train_tasks if t.env_name == name)
+            env.set_task(task)
+            rand_vec = getattr(env, "_last_rand_vec", None)
+            if rand_vec is None:
+                rand_vec = env._random_reset_space.low
+            max_dim = max(max_dim, int(np.asarray(rand_vec).shape[0]))
+            env.close()
+        return max_dim
+
+    def _build_context(self, name: str, env: gym.Env) -> np.ndarray:
+        one_hot = np.zeros(self._n_classes, dtype=np.float32)
+        if name in self._train_class_to_idx:
+            one_hot[self._train_class_to_idx[name]] = 1.0
+        rand_vec_raw = getattr(env, "_last_rand_vec", None)
+        if rand_vec_raw is None:
+            rand_vec_raw = np.zeros(self._rand_vec_dim, dtype=np.float32)
+        rand_vec = np.asarray(rand_vec_raw, dtype=np.float32)
+        padded = np.zeros(self._rand_vec_dim, dtype=np.float32)
+        n = min(rand_vec.shape[0], self._rand_vec_dim)
+        padded[:n] = rand_vec[:n]
+        return np.concatenate([one_hot, padded], axis=-1)
 
     def get_env_funcs(self, benchmark, train_set: bool):
         classes = benchmark.train_classes if train_set else benchmark.test_classes
@@ -98,7 +144,10 @@ class KEpisodeMetaworld(gym.Env):
         return env_tasks
 
     def get_obs(self, og_obs, soft_reset: bool):
-        return np.concatenate((og_obs, [float(soft_reset)])).astype(np.float32)
+        parts = [np.asarray(og_obs, dtype=np.float32), np.array([float(soft_reset)], dtype=np.float32)]
+        if self.oracle:
+            parts.append(self._cached_context)
+        return np.concatenate(parts).astype(np.float32)
 
     def reset(self, *args, **kwargs):
         self.current_trial = 0
@@ -110,6 +159,8 @@ class KEpisodeMetaworld(gym.Env):
         self.task_name = new_task
         self.env.set_task(random.choice(tasks))
         obs = self.env.reset()
+        if self.oracle:
+            self._cached_context = self._build_context(new_task, self.env)
         return self.get_obs(obs, True), {}
 
     def step(self, action):

@@ -464,6 +464,15 @@ class MixtureOfDatasets(RLDataset):
         for d in self.all_datasets:
             d.delete()
 
+    def filter_by_max_unix_time(self, max_unix_time: float) -> dict[str, int]:
+        total = {"removed": 0, "kept": 0}
+        for d in self.all_datasets:
+            if hasattr(d, "filter_by_max_unix_time"):
+                stats = d.filter_by_max_unix_time(max_unix_time)
+                total["removed"] += stats.get("removed", 0)
+                total["kept"] += stats.get("kept", 0)
+        return total
+
     def get_description(self) -> str:
         return (
             f"MixtureOfDatasets with {len(self.all_datasets)} datasets"
@@ -645,6 +654,37 @@ class DiskTrajDataset(RLDataset):
             os.remove(file_to_delete)
             self.fifo_filenames.discard(file_to_delete)
         self.all_filenames = list(self.fifo_filenames | self.protected_filenames)
+
+    def filter_by_max_unix_time(self, max_unix_time: float) -> dict[str, int]:
+        """Remove FIFO trajectories with unix_time > max_unix_time.
+
+        Used after ckpt resume to roll back the buffer to its ckpt-paired
+        snapshot: trajectories collected after the ckpt was saved came from
+        a newer policy that the loaded ckpt does not represent, so they
+        break the (policy, buffer) pairing assumed by off-policy training.
+
+        Only operates on the FIFO buffer; protected trajectories are
+        never touched. Filenames that don't match the
+        ``<env>_<rand>_<unix_time>`` convention are skipped.
+        """
+        self._refresh_files()
+        path_to_name = lambda p: os.path.basename(os.path.splitext(p)[0])
+        to_delete = []
+        for traj_filename in self.fifo_filenames:
+            try:
+                _, _, unix_time = path_to_name(traj_filename).split("_")
+                if float(unix_time) > max_unix_time:
+                    to_delete.append(traj_filename)
+            except ValueError:
+                continue
+        for f in to_delete:
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+            self.fifo_filenames.discard(f)
+        self.all_filenames = list(self.fifo_filenames | self.protected_filenames)
+        return {"removed": len(to_delete), "kept": len(self.fifo_filenames)}
 
     def get_description(self) -> str:
         self.check_configured()

@@ -751,8 +751,8 @@ class MATETrajEncoder(TrajEncoder):
             w = torch.sigmoid(self.gate(seq))  # (B, L, 1)
             if log_dict is not None:
                 with torch.no_grad():
-                    log_dict["mate_gate_mean"] = w.mean().item()
-                    log_dict["mate_gate_std"] = w.std().item()
+                    log_dict["mate_gate_mean"] = w.mean().detach()
+                    log_dict["mate_gate_std"] = w.std().detach()
         else:
             w = seq.new_ones(B, L, 1)
 
@@ -926,8 +926,8 @@ class MateLinAttnTrajEncoder(TrajEncoder):
             output = (num / den).unsqueeze(1)
             if log_dict is not None:
                 with torch.no_grad():
-                    log_dict["mate_linattn_denominator_mean"] = den.mean().item()
-                    log_dict["mate_linattn_denominator_std"] = den.std().item()
+                    log_dict["mate_linattn_denominator_mean"] = den.mean().detach()
+                    log_dict["mate_linattn_denominator_std"] = den.std().detach()
             return output, (new_S, new_z)
         else:
             kv = k.unsqueeze(-1) * v.unsqueeze(-2)        # (B, L, d, d)  S[i,j] = k[i] v[j]
@@ -938,8 +938,8 @@ class MateLinAttnTrajEncoder(TrajEncoder):
             output = num / den
             if log_dict is not None:
                 with torch.no_grad():
-                    log_dict["mate_linattn_denominator_mean"] = den.mean().item()
-                    log_dict["mate_linattn_denominator_std"] = den.std().item()
+                    log_dict["mate_linattn_denominator_mean"] = den.mean().detach()
+                    log_dict["mate_linattn_denominator_std"] = den.std().detach()
             return output, None
 
 

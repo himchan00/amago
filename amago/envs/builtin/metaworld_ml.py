@@ -98,13 +98,25 @@ class KEpisodeMetaworld(gym.Env):
         self.action_space = space_convert(self.env.action_space)
         self.max_episode_length = max_episode_length
         og_obs = space_convert(self.env.observation_space)
-        # obs layout: [original obs | soft_reset_flag | (oracle context if enabled)]
-        low = og_obs.low.tolist() + [0.0] + [-np.inf] * self._context_dim
-        high = og_obs.high.tolist() + [1.0] + [np.inf] * self._context_dim
-        self.observation_space = gym.spaces.Box(
-            low=np.asarray(low, dtype=np.float32),
-            high=np.asarray(high, dtype=np.float32),
+        # observation = [original obs | soft_reset_flag]
+        obs_low = og_obs.low.tolist() + [0.0]
+        obs_high = og_obs.high.tolist() + [1.0]
+        observation_space = gym.spaces.Box(
+            low=np.asarray(obs_low, dtype=np.float32),
+            high=np.asarray(obs_high, dtype=np.float32),
         )
+        if self.oracle:
+            # Dict obs so agents can route `context` to a separate encoder.
+            context_space = gym.spaces.Box(
+                low=-np.inf, high=np.inf,
+                shape=(self._context_dim,), dtype=np.float32,
+            )
+            self.observation_space = gym.spaces.Dict({
+                "observation": observation_space,
+                "context": context_space,
+            })
+        else:
+            self.observation_space = observation_space
 
     @staticmethod
     def _compute_rand_vec_dim(benchmark) -> int:
@@ -144,10 +156,16 @@ class KEpisodeMetaworld(gym.Env):
         return env_tasks
 
     def get_obs(self, og_obs, soft_reset: bool):
-        parts = [np.asarray(og_obs, dtype=np.float32), np.array([float(soft_reset)], dtype=np.float32)]
+        observation = np.concatenate(
+            [np.asarray(og_obs, dtype=np.float32),
+             np.array([float(soft_reset)], dtype=np.float32)]
+        ).astype(np.float32)
         if self.oracle:
-            parts.append(self._cached_context)
-        return np.concatenate(parts).astype(np.float32)
+            return {
+                "observation": observation,
+                "context": self._cached_context.astype(np.float32),
+            }
+        return observation
 
     def reset(self, *args, **kwargs):
         self.current_trial = 0

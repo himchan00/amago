@@ -363,6 +363,35 @@ class CNNTstepEncoder(TstepEncoder):
         return self._emb_dim
 
 
+class TrivialTstepEncoder(TstepEncoder):
+    """Zero-cost timestep encoder. Returns a (B, L, 1) zero tensor.
+
+    Used by markov/oracle agents whose actor/critic input is built entirely
+    from obs_shortcut encoders, so the standard tstep+traj path can be
+    bypassed without adding parameters or compute. ``emb_dim=1`` (not 0)
+    keeps shape arithmetic safe in :meth:`amago.agent.Agent.forward`.
+    """
+
+    def __init__(self, obs_space: gym.Space, rl2_space: gym.Space):
+        super().__init__(obs_space=obs_space, rl2_space=rl2_space)
+
+    @property
+    def emb_dim(self) -> int:
+        return 1
+
+    def inner_forward(
+        self,
+        obs: dict[str, torch.Tensor],
+        rl2s: torch.Tensor,
+        log_dict: Optional[dict] = None,
+    ) -> torch.Tensor:
+        any_t = next(iter(obs.values()))
+        return torch.zeros(
+            any_t.shape[0], any_t.shape[1], 1,
+            device=any_t.device, dtype=torch.float32,
+        )
+
+
 @gin.configurable
 class FFObsEncoder(nn.Module):
     """MLP encoder for raw observations (no rl2s). Used by obs_shortcut.

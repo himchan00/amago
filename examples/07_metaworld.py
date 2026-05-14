@@ -43,6 +43,26 @@ if __name__ == "__main__":
     if args.use_gate:
         assert args.traj_encoder == "mate", "Gating is only supported for MATE trajectory encoder."
 
+    if args.agent_type in ("markov_multitask", "oracle_multitask"):
+        assert args.obs_shortcut, (
+            f"--agent_type={args.agent_type} requires --obs_shortcut "
+            "(actor/critic input is built from FFObsEncoder)."
+        )
+        if args.traj_encoder != "ff":
+            print(
+                f"[warn] --traj_encoder={args.traj_encoder} is ignored by "
+                f"{args.agent_type} (forced to MarkovTrajEncoder internally)."
+            )
+    if args.agent_type == "oracle_multitask":
+        assert args.oracle, (
+            "--agent_type=oracle_multitask requires --oracle "
+            "(env must emit a 'context' obs key)."
+        )
+    if args.agent_type == "markov_multitask":
+        assert not args.oracle, (
+            "--agent_type=markov_multitask should be run without --oracle."
+        )
+
     traj_encoder_extra_kwargs = {}
     if args.traj_encoder == "mate":
         traj_encoder_extra_kwargs["use_gate"] = args.use_gate
@@ -62,11 +82,20 @@ if __name__ == "__main__":
         layers=args.memory_layers,
         **traj_encoder_extra_kwargs,
     )
+    agent_extra_kwargs = {}
+    if args.agent_type in ("markov_multitask", "oracle_multitask"):
+        # Mirror the obs_encoder shape that the standard `multitask` + obs_shortcut
+        # path would build for the same --memory_size / --memory_layers, so the
+        # ablation differs only in the markov/oracle-specific structure.
+        agent_extra_kwargs["obs_encoder_d_output"] = args.memory_size
+        agent_extra_kwargs["obs_encoder_n_traj_layers"] = args.memory_layers
+
     agent_type = cli_utils.switch_agent(
         config, args.agent_type, reward_multiplier=1.0, num_critics=4,
         obs_shortcut=args.obs_shortcut,
                     obs_shortcut_scale=args.obs_shortcut_scale, # "tstep" or "full"
                     project_output=args.project_output,
+        **agent_extra_kwargs,
     )
     exploration_type = cli_utils.switch_exploration(
         config, "bilevel", steps_anneal=2_000_000, rollout_horizon=args.k * 500

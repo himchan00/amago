@@ -17,9 +17,9 @@ import gin
 import gymnasium as gym
 
 from amago.loading import Batch, MAGIC_PAD_VAL
-from amago.nets.tstep_encoders import TstepEncoder, FFObsEncoder
+from amago.nets.tstep_encoders import TstepEncoder, FFObsEncoder, TrivialTstepEncoder
 from amago.nets import ff
-from amago.nets.traj_encoders import TrajEncoder
+from amago.nets.traj_encoders import TrajEncoder, MarkovTrajEncoder
 from amago.nets import actor_critic
 from amago.nets.policy_dists import DiscreteLikeContinuous
 from amago import utils
@@ -1628,3 +1628,168 @@ class MultiTaskAgent(Agent):
             }
         )
         return stats
+
+
+def _build_obs_encoder_kwargs(self) -> tuple[gym.spaces.Dict, dict]:
+    """Helper used by markov/oracle agents: produce (filtered_space, scale_kwargs).
+
+    The standard obs_shortcut path in ``BaseAgent.init_encoders`` extracts
+    "full" scale info from the FFTstepEncoder/TrajEncoder it just built;
+    those don't exist for markov/oracle (we use TrivialTstepEncoder +
+    MarkovTrajEncoder), so we read sizes from the agent's
+    ``obs_encoder_*`` constructor kwargs (typically wired to ``--memory_size``
+    and ``--memory_layers`` by the example script).
+    """
+    shortcut_space = gym.spaces.Dict(
+        {k: v for k, v in self.obs_space.items() if not k.startswith("_prev_")}
+    )
+    scale = getattr(self, "obs_shortcut_scale", "tstep")
+    extra = {"scale": scale}
+    d_output = getattr(self, "_oe_d_output", None)
+    if d_output is not None:
+        extra["d_output"] = d_output
+    if scale == "full":
+        extra["full_n_tstep_layers"] = getattr(self, "_oe_n_tstep", 2)
+        extra["full_d_tstep_hidden"] = getattr(self, "_oe_d_tstep", 512)
+        extra["full_n_traj_layers"] = getattr(self, "_oe_n_traj", 3)
+    return shortcut_space, extra
+
+
+@gin.configurable
+@register_agent("markov_multitask")
+class MarkovMultiTaskAgent(MultiTaskAgent):
+    """MultiTaskAgent variant where actor & critic see only the obs_encoder output.
+
+    Bypasses the standard tstep_encoder + traj_encoder pipeline using
+    :class:`~amago.nets.tstep_encoders.TrivialTstepEncoder` and
+    :class:`~amago.nets.traj_encoders.MarkovTrajEncoder` (both no-op, no
+    parameters or compute). The actor/critic input comes entirely from the
+    ``obs_shortcut`` :class:`FFObsEncoder` run on the current observation.
+
+    Mirrors the "markov" baseline in the Memory-RL repo. Distinct from
+    ``--traj_encoder=ff``, which still produces a learned per-step embedding
+    that feeds into the actor/critic input.
+
+    Requires ``obs_shortcut=True`` (asserted at ``init_encoders``). The
+    ``tstep`` and ``traj`` encoder types passed in are ignored.
+
+    Args:
+        obs_encoder_d_output: Output dim of the obs_encoder; mirrors the
+            existing path's ``d_output = traj.emb_dim`` (i.e., ``--memory_size``).
+            None falls back to FFObsEncoder's gin default.
+        obs_encoder_n_traj_layers: Residual FFN block count when
+            ``obs_shortcut_scale="full"``; mirrors the existing path's
+            ``traj.n_layers`` (i.e., ``--memory_layers``).
+        obs_encoder_n_tstep_layers / obs_encoder_d_tstep_hidden: Stage-1 MLP
+            shape; default to FFTstepEncoder's library defaults.
+    """
+
+    def __init__(
+        self,
+        *args,
+        obs_encoder_d_output: Optional[int] = None,
+        obs_encoder_n_traj_layers: int = 3,
+        obs_encoder_n_tstep_layers: int = 2,
+        obs_encoder_d_tstep_hidden: int = 512,
+        **kwargs,
+    ):
+        # Stash before super().__init__ → BaseAgent.__init__ → self.init_encoders().
+        self._oe_d_output = obs_encoder_d_output
+        self._oe_n_traj = obs_encoder_n_traj_layers
+        self._oe_n_tstep = obs_encoder_n_tstep_layers
+        self._oe_d_tstep = obs_encoder_d_tstep_hidden
+        super().__init__(*args, **kwargs)
+
+    def init_encoders(self) -> None:
+        assert getattr(self, "obs_shortcut", False), (
+            "MarkovMultiTaskAgent requires obs_shortcut=True (actor/critic "
+            "input is built entirely from FFObsEncoder)."
+        )
+        self.tstep_encoder = TrivialTstepEncoder(
+            obs_space=self.obs_space,
+            rl2_space=self.rl2_space,
+        )
+        self.traj_encoder = MarkovTrajEncoder(
+            tstep_dim=self.tstep_encoder.emb_dim,
+            max_seq_len=self.max_seq_len,
+        )
+        shortcut_space, extra = _build_obs_encoder_kwargs(self)
+        self.obs_encoder = FFObsEncoder(obs_space=shortcut_space, **extra)
+
+
+@gin.configurable
+@register_agent("oracle_multitask")
+class OracleMultiTaskAgent(MultiTaskAgent):
+    """MultiTaskAgent variant for the oracle ablation.
+
+    Actor & critic see ``concat(obs_encoder(obs["observation"]),
+    context_encoder(obs["context"]))``. The two encoders share architecture
+    (only input dim differs). Bypasses tstep_encoder + traj_encoder for the
+    same efficiency reason as :class:`MarkovMultiTaskAgent`.
+
+    Requires the env to expose ``"context"`` in its observation Dict (i.e.,
+    pass ``--oracle`` on the example script). Requires ``obs_shortcut=True``.
+
+    Args: Same ``obs_encoder_*`` knobs as :class:`MarkovMultiTaskAgent`.
+    """
+
+    def __init__(
+        self,
+        *args,
+        obs_encoder_d_output: Optional[int] = None,
+        obs_encoder_n_traj_layers: int = 3,
+        obs_encoder_n_tstep_layers: int = 2,
+        obs_encoder_d_tstep_hidden: int = 512,
+        **kwargs,
+    ):
+        self._oe_d_output = obs_encoder_d_output
+        self._oe_n_traj = obs_encoder_n_traj_layers
+        self._oe_n_tstep = obs_encoder_n_tstep_layers
+        self._oe_d_tstep = obs_encoder_d_tstep_hidden
+        super().__init__(*args, **kwargs)
+
+    def init_encoders(self) -> None:
+        assert getattr(self, "obs_shortcut", False), (
+            "OracleMultiTaskAgent requires obs_shortcut=True."
+        )
+        assert "context" in self.obs_space.spaces, (
+            "OracleMultiTaskAgent requires obs_space to contain a 'context' "
+            "key (pass --oracle so the env emits the privileged context)."
+        )
+        assert "observation" in self.obs_space.spaces, (
+            "OracleMultiTaskAgent requires obs_space to contain an "
+            "'observation' key alongside 'context'."
+        )
+        self.tstep_encoder = TrivialTstepEncoder(
+            obs_space=self.obs_space,
+            rl2_space=self.rl2_space,
+        )
+        self.traj_encoder = MarkovTrajEncoder(
+            tstep_dim=self.tstep_encoder.emb_dim,
+            max_seq_len=self.max_seq_len,
+        )
+        _, extra = _build_obs_encoder_kwargs(self)
+        obs_only_space = gym.spaces.Dict(
+            {"observation": self.obs_space["observation"]}
+        )
+        ctx_only_space = gym.spaces.Dict(
+            {"context": self.obs_space["context"]}
+        )
+        self.obs_encoder = FFObsEncoder(obs_space=obs_only_space, **extra)
+        self.context_encoder = FFObsEncoder(obs_space=ctx_only_space, **extra)
+
+    @property
+    def state_dim(self) -> int:
+        dim = self.traj_encoder.emb_dim
+        if getattr(self, "obs_shortcut", False):
+            dim += self.obs_encoder.emb_dim + self.context_encoder.emb_dim
+        return dim
+
+    def _compute_obs_emb(
+        self, obs: dict[str, torch.Tensor]
+    ) -> Optional[torch.Tensor]:
+        if not getattr(self, "obs_shortcut", False):
+            return None
+        obs_emb = self.obs_encoder({"observation": obs["observation"]})
+        ctx_emb = self.context_encoder({"context": obs["context"]})
+        return torch.cat((obs_emb, ctx_emb), dim=-1)
